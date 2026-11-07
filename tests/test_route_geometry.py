@@ -8,7 +8,7 @@ from tests.support import IsolatedCase
 from tests.plan_fixture import sample_ring
 from funsport import map_preview
 from funsport.api.flow import _ring_length
-from funsport.coordinates import distance_m
+from funsport.coordinates import bd09_to_gcj02, distance_m
 from funsport.track import generator, wire
 from funsport.track.geom import make_point_ring, ring_point_at, to_bd
 
@@ -121,6 +121,290 @@ class RouteGeometryTests(IsolatedCase):
         self.assertEqual([point["type"] for point in track["locations"]],
                          [point["type"] for point in encoded_points])
 
+    def test_open_path_never_closes_or_wraps(self):
+        route = sample_ring()[:-1]
+        dense, arcs, center = make_point_ring(route, ordered=True, open_path=True)
+        self.assertNotEqual(dense[0], dense[-1])
+        self.assertEqual(len(dense), len(route))
+        self.assertEqual(ring_point_at(dense, arcs, arcs[-1], open_path=True), dense[-1])
+        self.assertEqual(ring_point_at(dense, arcs, arcs[-1] + 100, open_path=True), dense[-1])
+        self.assertEqual(ring_point_at(dense, arcs, -100, open_path=True), dense[0])
+        closed, closed_arcs, _ = make_point_ring(route, ordered=True)
+        self.assertEqual(closed[0], closed[-1])
+        self.assertGreater(closed_arcs[-1], arcs[-1])
+
+    def test_open_path_generator_stays_on_mapped_road(self):
+        route = sample_ring()[:-1]
+        dense, arcs, center = make_point_ring(route, ordered=True, open_path=True)
+        distance = arcs[-1] - 50
+        with patch.object(generator.log, "disabled", True):
+            track = generator.build(distance, round(distance / 2.5), 42, 1000,
+                                    route, ordered_path=True, open_path=True,
+                                    cadence_target=160)
+        end = track["locations"][-1]
+        x, y = ring_point_at(dense, arcs, distance, open_path=True)
+        self.assertLess(distance_m((end["gLat"], end["gLng"]), to_bd(x, y, *center)), 0.12)
+        self.assertEqual((track["locations"][0]["gLat"], track["locations"][0]["gLng"]), route[0])
+        self.assertAlmostEqual(track["totalDistance"], distance, places=1)
+
+    def test_open_path_can_stop_exactly_at_last_mapped_vertex(self):
+        route = sample_ring()[:-1]
+        _, arcs, _ = make_point_ring(route, ordered=True, open_path=True)
+        with patch.object(generator.log, "disabled", True):
+            track = generator.build(arcs[-1], round(arcs[-1] / 2.5), 42, 1000,
+                                    route, ordered_path=True, open_path=True,
+                                    cadence_target=160)
+        end = track["locations"][-1]
+        self.assertLess(distance_m((end["gLat"], end["gLng"]), route[-1]), .12)
+
+    def test_open_path_rejects_distance_requiring_unmapped_connector(self):
+        route = sample_ring()[:-1]
+        _, arcs, _ = make_point_ring(route, ordered=True, open_path=True)
+        with patch.object(generator.log, "disabled", True), self.assertRaisesRegex(ValueError, "道路折线不足"):
+            generator.build(arcs[-1] + 1, round(arcs[-1] / 2.5), 42, 1000,
+                            route, ordered_path=True, open_path=True)
+
+    @staticmethod
+    def sampled_road(shape, length=6000):
+        """Synthetic road substitutes, never a private/reference GPS skeleton."""
+        import math
+        from funsport.coordinates import gcj02_to_bd09
+        coords = []
+        for i in range(int(length / 3) + 1):
+            x = i * 3.0
+            if shape == "straight":
+                y = 0.0
+            elif shape == "turns":
+                x = min(i * 3.0, 500.0) + max(0.0, i * 3.0 - 1000.0)
+                y = min(500.0, max(0.0, i * 3.0 - 500.0))
+            else:
+                y = (i % 4 if i // 4 % 2 == 0 else 4 - i % 4) * 3.0
+            coords.append(gcj02_to_bd09(30 + y / 111195.0802335329,
+                                       110 + x / (111195.0802335329 * math.cos(math.radians(30)))))
+        return coords
+
+    @staticmethod
+    def road_from_xy(points):
+        import math
+        from funsport.coordinates import gcj02_to_bd09
+        return [gcj02_to_bd09(30 + y / 111195.0802335329,
+                             110 + x / (111195.0802335329 * math.cos(math.radians(30))))
+                for x, y in points]
+
+    @staticmethod
+    def independent_road_distance(dense, arcs, center, start, end):
+        # Deliberately enumerate original knots instead of using the sampler's
+        # prefix cache; count every traversal of a naturally repeated edge.
+        marks = [start] + [s for s in arcs if start < s < end] + [end]
+        coords = [bd09_to_gcj02(*to_bd(*ring_point_at(dense, arcs, s, open_path=True), *center))
+                  for s in marks]
+        return sum(distance_m(a, b) for a, b in zip(coords, coords[1:]))
+
+    def test_sampled_distance_matches_output_matrix_and_physical_accounting(self):
+        for shape in ("straight", "turns", "zigzag"):
+            road = self.sampled_road(shape)
+            dense, arcs, center = make_point_ring(road, ordered=True, open_path=True)
+            for period in (1, 2):
+                for seed in (1, 42, 20261206):
+                    for requested in (300, 2001):
+                        duration = round(requested * .36)
+                        with self.subTest(shape=shape, period=period, seed=seed, distance=requested), \
+                             patch.object(generator.log, "disabled", True), \
+                             patch.object(generator, "_sampled_gcj_plan", wraps=generator._sampled_gcj_plan) as planner:
+                            if (shape, period, seed, requested) == ("zigzag", 2, 1, 2001):
+                                # Fixed draw #88 needs 10.205m output chord but
+                                # at most 9.590m exists in its 13.2m road budget.
+                                # Reject this fixed plan without regeneration.
+                                with self.assertRaisesRegex(ValueError, "GCJ road traversal speed budget"):
+                                    generator.build(requested, duration, seed, 0, road,
+                                                    ordered_path=True, open_path=True,
+                                                    cadence_target=170, sample_period_s=period,
+                                                    distance_mode="sampled_gcj")
+                                self.assertEqual(planner.call_count, 1)
+                                continue
+                            track = generator.build(requested, duration, seed, 0, road,
+                                                    ordered_path=True, open_path=True,
+                                                    cadence_target=170, sample_period_s=period,
+                                                    distance_mode="sampled_gcj")
+                            points = track["locations"]
+                            coords = [bd09_to_gcj02(p["gLat"], p["gLng"]) for p in points]
+                            measured = traversed = 0.0
+                            for i, (a, b) in enumerate(zip(points, points[1:])):
+                                dd = distance_m(coords[i], coords[i + 1])
+                                measured += dd
+                                self.assertAlmostEqual(b["totalDis"], measured, delta=.0001)
+                                self.assertGreater(b["pathProgressM"], a["pathProgressM"])
+                                self.assertGreater(b["totalTime"], a["totalTime"])
+                                self.assertGreaterEqual(b["steps"], a["steps"])
+                                self.assertLessEqual(dd, 6.6 * (b["totalTime"] - a["totalTime"]))
+                                along = self.independent_road_distance(
+                                    dense, arcs, center, a["pathProgressM"], b["pathProgressM"])
+                                traversed += along
+                                self.assertLessEqual(along, 6.6 * (b["totalTime"] - a["totalTime"]) + 1e-7)
+                            self.assertAlmostEqual(measured, requested, delta=.25)
+                            self.assertAlmostEqual(track["totalDistance"], measured, delta=.001)
+                            self.assertEqual(track["totalTime"], duration)
+                            self.assertEqual(points[-1]["steps"], track["totalSteps"])
+                            self.assertAlmostEqual(track["totalSteps"] / duration * 60, 170, delta=.6)
+                            audit = track["distanceAudit"]
+                            self.assertAlmostEqual(audit["road_gcj_m"], traversed, delta=1e-6)
+                            self.assertAlmostEqual(audit["road_minus_sampled_gcj_m"],
+                                                   traversed - measured, delta=1e-6)
+                            self.assertEqual(audit["kinematics_distance_basis"], "sampled_gcj_chords")
+                            self.assertLessEqual(audit["max_road_gcj_speed_mps"], 6.6)
+                            self.assertEqual(planner.call_count, 1)
+                            dts = planner.call_args.args[4]
+                            self.assertEqual(len(points), len(dts) + 1)
+                            self.assertEqual([b["totalTime"] - a["totalTime"]
+                                              for a, b in zip(points, points[1:])], dts)
+                            self.assertLessEqual(audit["path_progress_m"], audit["available_bd_arc_m"])
+                            self.assertLessEqual(audit["coordinate_evaluations"], (8192 + 25) * (len(points) - 1))
+                            self.assertAlmostEqual(sum(w["time"] for w in track["speedPerTenSec"]), duration)
+
+    def test_legacy_arc_chord_loss_reproduces_without_jitter_and_defaults_unchanged(self):
+        from funsport.coordinates import bd09_to_gcj02
+        road = self.sampled_road("zigzag")
+        kwargs = dict(ordered_path=True, open_path=True, cadence_target=170)
+        with patch.object(generator.log, "disabled", True), \
+             patch.object(generator.realism, "jitter_series", side_effect=lambda n, rng: [0.0] * n):
+            legacy = generator.build(2001, 720, 20261206, 0, road, **kwargs)
+            explicit = generator.build(2001, 720, 20261206, 0, road, distance_mode="arc", **kwargs)
+            corrected = generator.build(2001, 720, 20261206, 0, road, distance_mode="sampled_gcj", **kwargs)
+        def measured(track):
+            coords = [bd09_to_gcj02(p["gLat"], p["gLng"]) for p in track["locations"]]
+            return sum(distance_m(a, b) for a, b in zip(coords, coords[1:]))
+        self.assertEqual(legacy, explicit)
+        self.assertLess(measured(legacy), 1950)
+        self.assertAlmostEqual(measured(corrected), 2001, delta=.25)
+        self.assertGreater(corrected["distanceAudit"]["path_progress_m"], 2001)
+
+    def test_sampled_distance_fails_on_short_road_without_inventing_extension(self):
+        road = self.sampled_road("zigzag", length=1500)
+        with patch.object(generator.log, "disabled", True), \
+             self.assertRaisesRegex(ValueError, "more mapped forward road|道路折线不足|GCJ road traversal speed budget"):
+            generator.build(2001, 720, 20261206, 0, road, ordered_path=True,
+                            open_path=True, distance_mode="sampled_gcj")
+
+    def test_sampled_distance_is_deterministic_and_rejects_ambiguous_modes(self):
+        road = self.sampled_road("turns")
+        kwargs = dict(ordered_path=True, open_path=True, distance_mode="sampled_gcj")
+        with patch.object(generator.log, "disabled", True):
+            a = generator.build(300, 108, 42, 0, road, **kwargs)
+            b = generator.build(300, 108, 42, 0, road, **kwargs)
+            self.assertEqual(a, b)
+            for changes in ({"distance_mode": "other"}, {"open_path": False},
+                            {"checkpoints_bd": road[:1]}, {"dur": 108.5}):
+                options = dict(kwargs, **changes)
+                duration = options.pop("dur", 108)
+                with self.subTest(changes=changes), self.assertRaises(ValueError):
+                    generator.build(300, duration, 42, 0, road, **options)
+
+    def test_sampled_hairpin_and_tight_snake_cannot_hide_fast_road_traversal(self):
+        hairpin = [(0, 0), (5, 0), (5, 1), (0, 1), (0, 2), (30, 2)]
+        snake = [(0, 0)]
+        for row in range(20):
+            x = 5 if row % 2 == 0 else 0
+            snake.append((x, row * .5))
+            if row < 19:
+                snake.append((x, (row + 1) * .5))
+        self.assertEqual(len(snake), len(set(snake)))
+        for shape in (hairpin, snake):
+            road = self.road_from_xy(shape)
+            dense, arcs, center = make_point_ring(road, ordered=True, open_path=True)
+            # Before this fix both returned a ~6m output chord after >13.2m
+            # of original GCJ road in two seconds, without any jitter.
+            with self.subTest(shape=shape[:4]), self.assertRaisesRegex(
+                    ValueError, "GCJ road traversal speed budget"):
+                generator._sampled_gcj_plan(dense, arcs, center, [3.0], [2], [0.0], [0.0], 6.0)
+            # A feasible prefix of the same shape remains usable. Rejection is
+            # caused by this fixed interval budget, not by banning bends.
+            plan, _, traversals = generator._sampled_gcj_plan(
+                dense, arcs, center, [2.0], [2], [0.0], [0.0], 4.0)
+            self.assertLess(plan[0][0], arcs[1])
+            self.assertLessEqual(traversals[0], 13.2)
+            self.assertAlmostEqual(plan[0][-1], 4.0, delta=.25)
+
+    def test_sampled_nonmonotone_chord_keeps_feasible_early_peak(self):
+        # The first corner peaks between the old 0.5m search probes. A coarse
+        # endpoint-only bracket misses it and can jump to a later road visit.
+        road = self.road_from_xy([(0, 0), (4.2, 0), (0, .1), (30, .1)])
+        dense, arcs, center = make_point_ring(road, ordered=True, open_path=True)
+        start_bd = tuple(generator.round_to(v, 6) for v in to_bd(*dense[0], *center))
+        corner_bd = tuple(generator.round_to(v, 6) for v in to_bd(*dense[1], *center))
+        target = distance_m(bd09_to_gcj02(*start_bd), bd09_to_gcj02(*corner_bd)) - .01
+        plan, _, traversals = generator._sampled_gcj_plan(
+            dense, arcs, center, [target / 2], [2], [0.0], [0.0], target)
+        self.assertLessEqual(plan[0][0], arcs[1] + 1e-6)
+        self.assertLessEqual(traversals[0], 13.2)
+        self.assertAlmostEqual(plan[0][-1], target, delta=.25)
+
+    def test_gcj_traversal_counts_partial_segments_turns_and_repeated_edges(self):
+        road = self.road_from_xy([(0, 0), (5, 0), (5, 2), (0, 2), (0, 0), (5, 0), (20, 0)])
+        dense, arcs, center = make_point_ring(road, ordered=True, open_path=True)
+        traversal = generator._GcjRoadTraversal(dense, arcs, center)
+        for start, end in ((.2, 1.7), (.2, arcs[1] + .4),
+                           (arcs[1], arcs[4]), (.3, arcs[5] + .7)):
+            with self.subTest(start=start, end=end):
+                expected = self.independent_road_distance(dense, arcs, center, start, end)
+                self.assertAlmostEqual(traversal.distance(start, end), expected, delta=1e-7)
+                limit = traversal.limit(start, expected)
+                self.assertAlmostEqual(limit, end, delta=1e-5)
+        repeated = traversal.distance(0, arcs[5])
+        self.assertGreater(repeated, 18)
+        self.assertGreater(repeated, distance_m(traversal.vertices[0], traversal.vertices[5]) + 10)
+        # BD progress is a location coordinate, not the GCJ distance metric.
+        self.assertGreater(abs(traversal.distance(0, arcs[-1]) - arcs[-1]), .01)
+
+    def test_sampled_natural_road_revisit_is_legal_and_counted(self):
+        road = self.road_from_xy([(0, 0), (30, 0), (30, 30), (0, 30), (0, 0), (30, 0), (60, 0)])
+        dense, arcs, center = make_point_ring(road, ordered=True, open_path=True)
+        speeds, dts = [3.0] * 28, [2] * 28
+        plan, _, traversals = generator._sampled_gcj_plan(
+            dense, arcs, center, speeds, dts, [0.0] * 28, [0.0] * 28, 168.0)
+        self.assertGreater(plan[-1][0], arcs[5])
+        previous = 0.0
+        for row, along in zip(plan, traversals):
+            self.assertGreater(row[0], previous)
+            self.assertLessEqual(along, 13.2)
+            self.assertAlmostEqual(along, self.independent_road_distance(
+                dense, arcs, center, previous, row[0]), delta=1e-7)
+            previous = row[0]
+        self.assertGreater(sum(traversals), 168)
+
+    def test_sampled_quantization_at_speed_guard_and_one_second_tail(self):
+        road = self.road_from_xy([(0, 0), (100, 0)])
+        dense, arcs, center = make_point_ring(road, ordered=True, open_path=True)
+        for dts in ([1], [2], [2, 1]):
+            speeds = [6.6] * len(dts)
+            target = sum(v * dt for v, dt in zip(speeds, dts))
+            with self.subTest(dts=dts):
+                plan, _, traversals = generator._sampled_gcj_plan(
+                    dense, arcs, center, speeds, dts, [0.0] * len(dts), [0.0] * len(dts), target)
+                self.assertEqual(len(plan), len(dts))
+                for row, along, dt in zip(plan, traversals, dts):
+                    self.assertLessEqual(row[-1], 6.6 * dt)
+                    self.assertLessEqual(along, 6.6 * dt)
+                self.assertAlmostEqual(sum(row[-1] for row in plan), target, delta=.25)
+        short = self.road_from_xy([(0, 0), (2, 0)])
+        dense, arcs, center = make_point_ring(short, ordered=True, open_path=True)
+        with self.assertRaisesRegex(ValueError, "mapped forward road"):
+            generator._sampled_gcj_plan(dense, arcs, center, [3.0], [2], [0.0], [0.0], 6.0)
+
+    def test_sampled_two_second_output_preserves_odd_duration_tail(self):
+        # Force only the synthetic clock to exercise a one-second last dt.
+        # Production 2s mode also permits its existing 1/3/4/6s gaps.
+        with patch.object(generator.log, "disabled", True), \
+             patch.object(generator.realism, "sample_interval_series", return_value=list(range(0, 109, 2))):
+            track = generator.build(300, 109, 42, 0, self.sampled_road("turns"),
+                                    ordered_path=True, open_path=True, sample_period_s=2,
+                                    distance_mode="sampled_gcj")
+        points = track["locations"]
+        self.assertEqual(track["totalTime"], 109)
+        self.assertEqual(points[-1]["totalTime"] - points[-2]["totalTime"], 1)
+        self.assertEqual(len(points), 56)
+        self.assertLessEqual(track["distanceAudit"]["max_road_gcj_speed_mps"], 6.6)
+        self.assertAlmostEqual(track["distanceAudit"]["sampled_gcj_m"], 300, delta=.25)
+
     def test_empty_track_has_no_invented_line_or_markers(self):
         """无有效点时没有轨迹或起终点，不补造位置。"""
         self.assertEqual(map_preview.history_geometry(self.typed_track([-1, -1])),
@@ -136,15 +420,18 @@ class RouteGeometryTests(IsolatedCase):
                 end = track["locations"][-1]
                 x, y = ring_point_at(dense, arcs, distance)
                 expected = to_bd(x, y, *center)
-                self.assertLess(distance_m((end["gLat"], end["gLng"]), expected), 0.03)
+                # 坐标按真实设备的 6 位小数落盘，量化台阶在纬度方向约 0.11m、
+                # 经度方向约 0.10m，半台阶合计可达 0.08m；吸附错位是米级，
+                # 因此容差取 0.12m 仍能区分「按弧长重算」和「被附近顶点覆盖」。
+                self.assertLess(distance_m((end["gLat"], end["gLng"]), expected), 0.12)
 
     def test_distance_windows_use_corrected_progress(self):
         """制造0.75m拟合残差，窗口里程仍跟随校正后的实际累计值。"""
         original_fit = generator.fit_speeds
 
-        def undershoot(speeds, durations, target):
+        def undershoot(speeds, durations, target, floor=None, ceil=None):
             """只在测试中制造允许范围内的拟合偏差，检验末段校正。"""
-            original_fit(speeds, durations, target)
+            original_fit(speeds, durations, target, floor=floor, ceil=ceil)
             factor = (target - 0.75) / sum(speed * duration for speed, duration in zip(speeds, durations))
             for index in range(len(speeds)):
                 speeds[index] *= factor

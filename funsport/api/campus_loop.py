@@ -7,6 +7,7 @@
 import json
 import hashlib
 import math
+import random
 import time
 import requests
 
@@ -15,6 +16,7 @@ from ..config import get_amap_key, load_json, save_json
 from ..logger import log, ok, warn, dim
 from ..coordinates import bd09_to_gcj02, gcj02_to_bd09, checkpoint_coordinates, distance_m
 from ..run_diagnostics import current_archive
+from ..track.route_metrics import EARTH_RADIUS_M, route_overlap
 
 AMAP_V5 = "https://restapi.amap.com/v5/direction/walking"
 AMAP_V3 = "https://restapi.amap.com/v3/direction/walking"
@@ -26,6 +28,9 @@ CACHE_PROVIDER = "amap_walking"
 CACHE_TTL_MS = 86400_000
 MAX_ALTERNATIVES = 3
 MAX_COMBINATION_TRIES = 512
+# Policy weights, not fitted device statistics: each repeated metre costs 5x.
+REPEAT_PENALTY = 4.0
+NEAR_OPTIMAL_FRACTION = 0.05
 # 本工具的保守完整性阈值，不是高德或官方打卡标准。
 JOIN_TOLERANCE_M = 3.0
 ENDPOINT_TOLERANCE_M = 100.0
@@ -203,7 +208,7 @@ def _densify_turns(pts, max_angle=TURN_ANGLE_DEG):
     return out
 
 
-def _sanitize(pts):
+def _sanitize(pts, quiet=False):
     """对高德折线做去重和线段细分。"""
     n0 = len(pts)
     pts = _dedup_exact(pts)
@@ -212,7 +217,8 @@ def _sanitize(pts):
     n2 = len(pts)
     pts = _densify_turns(pts)
     n3 = len(pts)
-    dim(f"清洗: exact {n0}->{n1}, min_dist {n1}->{n2}, densify {n2}->{n3}")
+    if not quiet:
+        dim(f"清洗: exact {n0}->{n1}, min_dist {n1}->{n2}, densify {n2}->{n3}")
     return pts
 
 
@@ -301,7 +307,7 @@ def _validated_legs(value, checkpoints):
     return legs
 
 
-def _assemble_loop(legs, choices):
+def _assemble_loop(legs, choices, quiet=False):
     """拼接所选的真实道路；接缝或闭合失败时拒绝，不跨区域补直线。"""
     loop_gcj = []
     for options, choice in zip(legs, choices):
@@ -315,7 +321,7 @@ def _assemble_loop(legs, choices):
         return None
     if loop_gcj[-1] != loop_gcj[0]:
         loop_gcj.append(loop_gcj[0])
-    loop_gcj = _dedup_exact(_sanitize(loop_gcj))
+    loop_gcj = _dedup_exact(_sanitize(loop_gcj, quiet=quiet))
     if len(loop_gcj) < 2:
         return None
     if loop_gcj[-1] != loop_gcj[0]:
@@ -324,23 +330,67 @@ def _assemble_loop(legs, choices):
 
 
 def _select_loop(legs, checkpoints_bd, route_seed):
-    """由种子确定分段道路组合，跳过断线组合，保持选择可复现。"""
+    """Choose within 5% of the best evaluated score, not a global guarantee."""
     if type(route_seed) is not int:
         raise ValueError("道路随机种子必须为整数")
     counts = [len(options) for options in legs]
-    total = math.prod(counts)
-    for offset in range(min(total, MAX_COMBINATION_TRIES)):
-        variant = (route_seed + offset) % total
+    total = math.prod(counts) if counts else 0
+    if not total:
+        raise RuntimeError("没有可用的候选道路组合")
+    # Sample without replacement across the whole space, not adjacent radix IDs.
+    if total <= MAX_COMBINATION_TRIES:
+        variants = range(total)
+    else:
+        # Floyd sampling: O(limit) draws, including arbitrary-size Python ints.
+        rng = random.Random(route_seed)
+        variants, seen = [], set()
+        for upper in range(total - MAX_COMBINATION_TRIES, total):
+            draw = rng.randrange(upper + 1)
+            variant = upper if draw in seen else draw
+            seen.add(variant)
+            variants.append(variant)
+    valid = []
+    for variant in variants:
         remainder = variant
         choices = []
         for count in counts:
             choices.append(remainder % count)
             remainder //= count
-        ring = _validated_ring(_assemble_loop(legs, choices), checkpoints_bd)
-        if ring is not None:
-            return ring, {"segment_candidates": counts, "candidate_combinations": total,
-                          "selected_variant": variant + 1, "road_fingerprint": _ring_digest(ring)[:12]}
-    raise RuntimeError("高德候选道路无法连续闭合，停止生成；不会补直线或使用拟合环")
+        ring = _validated_ring(_assemble_loop(legs, choices, quiet=True), checkpoints_bd)
+        if ring is None:
+            continue
+        # Score exactly the validated BD polyline returned to the generator.
+        metrics = route_overlap(ring)
+        score = metrics["length_m"] + REPEAT_PENALTY * metrics["repeated_m"]
+        valid.append((score, variant, metrics))
+    if not valid:
+        raise RuntimeError(f"已检查 {len(variants)}/{total} 个候选组合，未找到连续闭环，停止生成；不会补直线或使用拟合环")
+    best = min(item[0] for item in valid)
+    near = sorted((item for item in valid if item[0] <= best * (1 + NEAR_OPTIMAL_FRACTION) + 1e-8),
+                  key=lambda item: item[1])
+    # Cycle only through scored near-optimal routes; consecutive seeds vary
+    # when the evaluated set is unchanged and has multiple qualifying options.
+    score, variant, metrics = near[route_seed % len(near)]
+    remainder = variant
+    choices = []
+    for count in counts:
+        choices.append(remainder % count)
+        remainder //= count
+    ring = _validated_ring(_assemble_loop(legs, choices), checkpoints_bd)
+    if ring is None:
+        raise RuntimeError("入选道路重建校验失败，停止生成")
+    return ring, {"segment_candidates": counts, "candidate_combinations": total,
+                  "selected_variant": variant + 1, "road_fingerprint": _ring_digest(ring)[:12],
+                  "selection_method": "length_plus_retraced_v2",
+                  "search_exhaustive": len(variants) == total,
+                  "repeat_penalty": REPEAT_PENALTY,
+                  "near_optimal_fraction": NEAR_OPTIMAL_FRACTION,
+                  "evaluated_combinations": len(variants), "valid_combinations": len(valid),
+                  "near_optimal_combinations": len(near),
+                  "route_length_m": round(metrics["length_m"], 3),
+                  "repeated_distance_m": round(metrics["repeated_m"], 3),
+                  "geometric_repeat_ratio": round(metrics["repeat_ratio"], 6),
+                  "selection_score": round(score, 3), "best_selection_score": round(best, 3)}
 
 
 def build_loop(checkpoints_bd, key, verbose=True, checkpoints_gcj=None, route_seed=0):
@@ -356,6 +406,31 @@ def build_loop(checkpoints_bd, key, verbose=True, checkpoints_gcj=None, route_se
         return None
 
 
+def _covers_checkpoints(ring, checkpoints):
+    """Prune with Earth-centred cells; final acceptance uses the original distance."""
+    if not checkpoints:
+        return True
+    # Chord distance never exceeds arc distance. A cell wider than the arc
+    # tolerance therefore finds every possible match in its 27 neighbours.
+    cell_size = ENDPOINT_TOLERANCE_M + 1e-6
+    def cell(point):
+        lat, lon = map(math.radians, point)
+        radial = EARTH_RADIUS_M * math.cos(lat)
+        return (math.floor(radial * math.cos(lon) / cell_size),
+                math.floor(radial * math.sin(lon) / cell_size),
+                math.floor(EARTH_RADIUS_M * math.sin(lat) / cell_size))
+    grid = {}
+    for vertex in ring:
+        grid.setdefault(cell(vertex), []).append(vertex)
+    for point in checkpoints:
+        x, y, z = cell(point)
+        if not any(dist_m(point, vertex) <= ENDPOINT_TOLERANCE_M
+                   for dx in (-1, 0, 1) for dy in (-1, 0, 1) for dz in (-1, 0, 1)
+                   for vertex in grid.get((x + dx, y + dy, z + dz), ())):
+            return False
+    return True
+
+
 def _validated_ring(value, checkpoints):
     """校验路线有限坐标、闭合和点位覆盖；无效缓存不得进入生成器。"""
     try:
@@ -366,7 +441,7 @@ def _validated_ring(value, checkpoints):
             return None
         if len(set(ring)) < 2 or dist_m(ring[0], ring[-1]) > JOIN_TOLERANCE_M:
             return None
-        if any(min(dist_m(point, vertex) for vertex in ring) > ENDPOINT_TOLERANCE_M for point in checkpoints):
+        if not _covers_checkpoints(ring, checkpoints):
             return None
         return ring
     except (ValueError, TypeError, OverflowError):

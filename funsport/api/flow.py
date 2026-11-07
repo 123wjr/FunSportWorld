@@ -19,17 +19,28 @@ from ..completion import evaluate_completion
 from ..run_plan import RunPlan, checkpoint_distances, prepare_checkpoint_order
 from ..track import generator, wire
 from ..track.checkpoints import evaluate_checkpoints
-from ..track.geom import MET_PER_DEG_LAT, MET_PER_DEG_LNG, SPEED_FLOOR, SPEED_CEIL
+from ..track.geom import (SPEED_FLOOR, SPEED_CEIL, meters_per_deg_lat,
+                          meters_per_deg_lng)
 from ..logger import log, ok, warn, step, err
 
 
 def _ring_length(ring):
-    """用与现有生成器一致的距离单位估算规划环长度。"""
+    """用与生成器一致的度量估算规划环长度。
+
+    必须和 ``make_point_ring`` 用同一套取米数的方式：经度每度米数随纬度按
+    cos(lat) 变化，固定 86600 隐含纬度 38.8°，在别的纬度会与生成器算出的
+    弧长差出百分之一以上，导致「规划里程」与「生成里程」对不上。
+    """
+    if len(ring) < 2:
+        return 0.0
+    lat0 = sum(p[0] for p in ring) / len(ring)
+    m_lat = meters_per_deg_lat(lat0)
+    m_lng = meters_per_deg_lng(lat0)
     total = 0.0
     for i in range(1, len(ring)):
         a, b = ring[i - 1], ring[i]
-        total += math.hypot((a[0] - b[0]) * MET_PER_DEG_LAT,
-                            (a[1] - b[1]) * MET_PER_DEG_LNG)
+        total += math.hypot((a[0] - b[0]) * m_lat,
+                            (a[1] - b[1]) * m_lng)
     return total
 
 
