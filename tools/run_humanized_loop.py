@@ -47,6 +47,7 @@ if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
 from funsport.api import campus_loop as cl                      # noqa: E402
+from funsport.coordinates import bd09_to_gcj02                  # noqa: E402
 from funsport.track import generator as gen                     # noqa: E402
 from funsport.track import geom                                 # noqa: E402
 from funsport.track import humanize as hz                       # noqa: E402
@@ -314,7 +315,14 @@ def run(laps, seed, pace, cadence_target, out_dir, want_charts, title, start_ms,
         tr, ring_len, dist, dur = build_track(pts_bd, lap, pace, seed, cadence_target,
                                               start_ms, sample_period_s)
         pts, tlen = track_to_points(tr, pts_bd)
-        doc = overlay_doc("laps=%d" % lap, pts, ring, pts_bd, lap, ring_len, dist, dur,
+        # 出图统一 GCJ-02：generator 落盘的 gLat/gLng 是 BD-09，Keep / 高德 / 地图
+        # 都是 GCJ-02，不转会整体偏 ~870 m（本起点实测）。
+        for p in pts:
+            g = bd09_to_gcj02(p["lat"], p["lng"])
+            p["lat"], p["lng"] = round(g[0], 7), round(g[1], 7)
+        road_gcj = [bd09_to_gcj02(lat, lng) for lat, lng in ring]
+        route_gcj = [bd09_to_gcj02(lat, lng) for lat, lng in pts_bd]
+        doc = overlay_doc("laps=%d" % lap, pts, road_gcj, route_gcj, lap, ring_len, dist, dur,
                           seed, cadence_target,
                           {"selection_variant": selection["selected_variant"],
                            "humanize_min_radius_m": round(hstats["min_radius_m"], 3),

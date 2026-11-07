@@ -28,7 +28,8 @@ sys.path.insert(0, str(ROOT / "tools"))
 
 from funsport import config                                     # noqa: E402
 from funsport.api import campus_loop as api_loop                # noqa: E402
-from funsport.coordinates import gcj02_to_bd09, distance_m      # noqa: E402
+from funsport.coordinates import (bd09_to_gcj02, distance_m,   # noqa: E402
+                                  gcj02_to_bd09)
 from funsport.track import generator as gen                     # noqa: E402
 from funsport.track import humanize as hz                       # noqa: E402
 import run_humanized_loop as rhl                                # noqa: E402
@@ -139,7 +140,14 @@ def main(argv=None):
           % (s["v_mean"], s["v_cv"], s["cadence_mean"], s["stride_mean"],
              s["max_low_speed_run"], s["cadence_elasticity"]))
 
-    doc = rhl.overlay_doc("%.2f km" % (args.target / 1000.0), pts, road_bd, route_bd,
+    # 出图统一用 GCJ-02：Keep/高德/地图都是 GCJ，内部 BD 在这里显式转回来，
+    # 否则图上整体偏 ~500 m，和 Keep 记录叠不上。
+    for p in pts:
+        g = bd09_to_gcj02(p["lat"], p["lng"])
+        p["lat"], p["lng"] = round(g[0], 7), round(g[1], 7)
+    road_gcj = [bd09_to_gcj02(lat, lng) for lat, lng in road_bd]
+    route_gcj = [bd09_to_gcj02(lat, lng) for lat, lng in route_bd]
+    doc = rhl.overlay_doc("%.2f km" % (args.target / 1000.0), pts, road_gcj, route_gcj,
                           laps, human_len, args.target, dur, args.seed, 0,
                           {"target_dist_m": args.target, "laps_needed": laps,
                            "chain_len_m": round(lap_len, 1),

@@ -116,6 +116,8 @@ w = ar1_log_speed × inertia × fatigue × wave × finish × walk
 
 数据 schema：funsport.overlay/1，最小字段 points[].{t, v, cadence, stride_m}；坐标、经验式列、10 s 派生序列都可缺省自动补。
 
+坐标系：generator 落盘的 gLat/gLng 是 **BD-09**（funsport/track/generator.py:669/717），而 Keep、高德、地图瓦片都是 **GCJ-02**。本起点两坐标系差 **868.5 m**，所以出图前必须用 funsport.coordinates.bd09_to_gcj02 转换，否则轨迹整体偏移、与 Keep 记录叠不上。tools/run_humanized_loop.py、tools/run_chain_route.py、tools/compare_keep.py 三个出图入口都已统一到 GCJ-02。
+
 命令行：
 
     .venv\Scripts\python.exe -B tools\run_overlay_charts.py --input artifacts/humanized/overlay_all.json
