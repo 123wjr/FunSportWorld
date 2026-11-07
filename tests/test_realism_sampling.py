@@ -259,6 +259,7 @@ class CachedRouteGenerationTests(IsolatedCase):
         self.assertTrue((self.data / "campus_loop_bd.json").exists())
         length = _ring_length(ring)
         with patch.object(loop, "get_amap_key", side_effect=AssertionError("应命中缓存")), \
+                patch.object(flow, "START_GCJ", None), \
                 patch.object(loop.log, "disabled", True), \
                 patch.object(flow.log, "disabled", True):
             for fraction in (1.0, 2.35):

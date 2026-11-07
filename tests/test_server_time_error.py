@@ -123,10 +123,12 @@ class LocalPreviewTests(IsolatedCase):
         self.cache_points()
         road = sample_ring()
         with patch.object(flow.log, "disabled", True), \
-                patch.object(flow.api_loop, "get_campus_loop", return_value=(road, {})), \
+                patch.object(flow.api_loop, "get_campus_loop", return_value=(road, {})) as amap, \
                 patch.object(flow.generator, "build", wraps=flow.generator.build) as build:
             flow.prepare_route_preview(fake_client(), 1.6, 400, 160, before=60, seed=42)
 
+        # 起点固定：预览与方案都从 START_GCJ 出发，而不是第一个点位。
+        self.assertEqual(amap.call_args.kwargs.get("start_gcj"), flow.START_GCJ)
         passed = build.call_args.args[4]
         self.assertNotEqual(passed, road, "拟人化没有生效，生成器仍拿到逐顶点照抄的高德折线")
         self.assertGreater(len(passed), len(road))

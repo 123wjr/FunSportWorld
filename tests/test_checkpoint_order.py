@@ -25,8 +25,11 @@ class CheckpointOrderTests(IsolatedCase):
                  "state": index, "isFixed": index % 2}
                 for index, (lat, lon) in enumerate(sample_ring()[:-1])]
 
-    def ring_for_points(self, points, route_seed=0, with_metadata=False):
-        """按传入顺序组成离线折线，并兼容带选路信息的新返回格式。"""
+    def ring_for_points(self, points, route_seed=0, with_metadata=False, start_gcj=None):
+        """按传入顺序组成离线折线，并兼容带选路信息的新返回格式。
+
+        start_gcj 是生产新增的固定起点参数；本用例只关心点位顺序，忽略它。
+        """
         ring = [(point["lat"], point["lon"]) for point in points]
         ring += [ring[0]]
         return (ring, {}) if with_metadata else ring

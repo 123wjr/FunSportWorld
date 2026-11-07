@@ -100,6 +100,31 @@ class HumanizeRouteTests(unittest.TestCase):
         out2, _ = hz.humanize_route(collinear, seed=1)
         self.assertGreaterEqual(len(out2), 3)
 
+    def test_multi_lap_is_not_the_same_ring_again(self):
+        """多圈是带独立平移的多圈路径：长度≈laps×单圈，且任何两圈不重合。"""
+        ring = square_ring(200.0)
+        single, sinfo = hz.humanize_route(ring, seed=7)
+        out, info = hz.humanize_laps(ring, seed=7, laps=3)
+        offsets = info["lap_offsets_m"]
+        self.assertEqual(len(offsets), 3)
+        self.assertEqual(offsets[0], 0.0)
+        for i in range(len(offsets)):
+            for j in range(i):
+                self.assertGreaterEqual(abs(offsets[i] - offsets[j]), 0.5)
+        # 抽稀后按弦长求和的单圈长度比 dense 路径短 1% 量级，属正常差异。
+        self.assertAlmostEqual(info["single_lap_length_m"],
+                               sinfo["total_length_m"],
+                               delta=0.02 * sinfo["total_length_m"])
+        self.assertGreater(info["total_length_m"], 2.6 * info["single_lap_length_m"])
+        after = hz.analyze_route(out)
+        self.assertLess(after["turn_max_deg"], 45.0)
+        self.assertEqual(after["n_turn_gt_45"], 0)
+        # 圈间不是逐点复制：第 2 圈中段与第 1 圈同一位置相距 ≥ 半个偏移等级。
+        n = len(single)
+        mid = n // 2
+        pair, _c, _s = hz._to_plane([out[mid], out[n + mid]])
+        self.assertGreater(hz._dist(pair[0], pair[1]), 0.5)
+
 
 if __name__ == "__main__":
     unittest.main()

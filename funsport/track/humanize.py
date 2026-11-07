@@ -77,9 +77,15 @@ DEFAULTS = {
     "repeat_angle_cos": 0.90,
     "repeat_lane_m": 1.6,          # 同向重复段的额外分道（1.6 实测把残留再压一档）
     "repeat_smooth_m": 10.0,
+    # 1b. 针尖毛刺（高德折线在路口的小尖刺，2~6 m 往返）
+    "spur_max_m": 6.0,
+    "spur_close_m": 10.0,
     # 8. 多圈
-    "lap_drift_m": 0.9,            # 每圈偏移的随机步长
-    "lap_drift_max_m": 1.8,        # 偏移绝对值上限
+    # 每圈换一条「车道」：步长至少 0.75 倍，保证相邻两圈不会因为随机游走抽到
+    # 接近 0 的增量而重新压在一起（实测 0.9/1.8 时第 2 圈只偏 -0.32 m）。
+    "lap_drift_m": 1.6,            # 每圈偏移的随机步长
+    "lap_drift_min_frac": 0.75,    # 步长下限（× lap_drift_m）
+    "lap_drift_max_m": 2.4,        # 偏移绝对值上限
     "lap_ramp_m": 30.0,            # 接缝处斜坡长度
     "clean_min_seg_m": 0.5,
     # 9. 输出抽稀
@@ -176,6 +182,37 @@ def _to_bd(P, center, scale):
 
 
 # ---------------------------------------------------------------- 1. clean
+
+def _snip_spurs(P, opt):
+    """剪掉地图数据里的「针尖」：来回各走 2~6 m 又原路返回的毛刺。
+
+    高德折线在路口/掉头点偶尔会出现 2 m 的尖刺（相邻两条腿几乎反向、端点
+    却只隔几米）。这种地方既不是真实掉头（真实掉头两条腿有几十米长），又会让
+    后面的靠右偏移把两条腿推向彼此、半径 1.2 m 的两个半圆互相穿插，交付折线
+    于是留下 70~110 度的假折角。判据：转角 > 150 度、且相邻某条腿短于
+    spur_max_m、且前后端点相距 < spur_close_m —— 直接删掉顶点，让它变成通路。
+    """
+    spur_max = float(opt["spur_max_m"])
+    close_max = float(opt["spur_close_m"])
+    out = list(P)
+    changed = True
+    while changed and len(out) > 3:
+        changed = False
+        n = len(out)
+        dirs, lens = _seg_info(out)
+        for i in range(n):
+            turn = _turn_deg(dirs[i - 1], dirs[i])
+            if turn <= 150.0:
+                continue
+            if lens[i - 1] >= spur_max and lens[i] >= spur_max:
+                continue
+            if _dist(out[i - 1], out[(i + 1) % n]) > close_max:
+                continue
+            del out[i]
+            changed = True
+            break
+    return out
+
 
 def _clean(P, min_seg_m):
     n = len(P)
@@ -548,6 +585,7 @@ def _relane_field(P, step, opt):
 def _humanize_plane(P, opt, lap_offsets):
     """平面内完整处理链。P 为纯环点列，lap_offsets 为逐圈常值偏移。"""
     P = _clean(P, opt["clean_min_seg_m"])
+    P = _snip_spurs(P, opt)
     P = _clean(P, opt["collapse_min_seg_m"])
     P, n_rounded = _round_corners(P, opt)
     P = _clean(P, 1e-6)
@@ -628,12 +666,29 @@ def humanize_route(points_bd, seed=0, **opt):
     return pts, info
 
 
-def humanize_laps(points_bd, seed=0, laps=1, **opt):
-    """多圈拟人化：第 0 圈为基准，其后每圈加一个常值横向偏移。
+def _arc_positions(P):
+    """环上逐点弧长与整环长度（最后一段回到首点）。"""
+    cum = [0.0]
+    for i in range(1, len(P)):
+        cum.append(cum[-1] + _dist(P[i - 1], P[i]))
+    total = cum[-1] + _dist(P[-1], P[0]) if len(P) > 1 else 0.0
+    return cum, total
 
-    返回的是一条**多圈拼接的环线**（长度 = 单圈 × laps），交给
-    generator.build 时用 dist = 这条环的长度、ordered_path=True 即可，
-    generator 会恰好走一圈；多圈的轨迹因此不会逐点重合。
+
+def humanize_laps(points_bd, seed=0, laps=1, **opt):
+    """多圈拟人化：单圈结果按圈拼接，每圈带独立的横向偏移。
+
+    单圈先按 humanize_route 的完整链处理（圆角、靠右、摆动、掉头），再复制
+    laps 份拼成一条**多圈路径**：第 0 圈不动，其后每圈整体平移一小段
+    （lap_drift_m / lap_drift_max_m），圈首 lap_ramp_m 内平滑过渡。
+    偏移量取「互不重合的等级」（0, ±g, ±2g…），保证任意两圈至少相隔 g；方向
+    由 seed 定，所有圈共用一个平移方向 —— 刚性平移不改变单圈形状，掉头半径
+    与走廊宽度都保持原样（按逐点法向偏移会把 180° 掉头两侧的走廊从 4 m 压到
+    1.6 m，弧与原路对不上，实测出现 176° 假折角）。
+    最后一圈末尾 lap_ramp_m 内平移回 0：否则点列末尾的偏移与起点差 1~2.4 m，
+    调用方补闭合边时会得到一条 155~171° 的斜线。
+    返回点列长度为单圈弧长的 laps 倍（不含闭合段），调用方必须保证
+    目标里程不超过它，否则生成器会回绕到第 0 圈。
     """
     import random
 
@@ -642,18 +697,67 @@ def humanize_laps(points_bd, seed=0, laps=1, **opt):
     o.setdefault("_phases", _seed_phases(seed, o))
     laps = max(1, int(laps))
     rng = random.Random(seed)
-    c = 0.0
-    lap_offsets = [0.0]
-    for _ in range(laps - 1):
-        c = max(-o["lap_drift_max_m"],
-                min(o["lap_drift_max_m"], c + rng.uniform(-1.0, 1.0) * o["lap_drift_m"]))
-        lap_offsets.append(c)
+    drift_max = float(o["lap_drift_max_m"])
+    # 用「互不重合的车道等级」而不是随机游走：随机游走只保证与上一圈有差，
+    # 第 3 圈可能又漂回第 1 圈的取值（实测 seed=7 的第 3 圈只差 0.13 m）。
+    # 等级取 0, ±g, ±2g…，任意两圈至少相隔 g；圈数多到放不下时按可用范围
+    # 收缩 g，而不是让偏移冲出 ±lap_drift_max_m。
+    gap = o["lap_drift_m"] * o["lap_drift_min_frac"]
+    if laps > 1:
+        gap = min(gap, 2.0 * drift_max / (laps - 1))
+    levels = [0.0]
+    k = 1
+    while len(levels) < laps:
+        levels.append(k * gap)
+        if len(levels) < laps:
+            levels.append(-k * gap)
+        k += 1
+    tail = levels[1:]
+    rng.shuffle(tail)
+    lap_offsets = [0.0] + tail
     P, center, scale = _to_plane(_cyclic(points_bd))
-    out, info = _humanize_plane(P, o, lap_offsets)
-    pts = _to_bd(out, center, scale)
-    info["laps"] = laps
-    info["lap_offsets_m"] = lap_offsets
-    return pts, info
+    single, info = _humanize_plane(P, o, [0.0])
+    n = len(single)
+    cum, lap_len = _arc_positions(single)
+    ramp = max(1.0, min(o["lap_ramp_m"], lap_len * 0.45))
+    angle = rng.uniform(0.0, 2.0 * math.pi)
+    ux, uy = math.cos(angle), math.sin(angle)
+    shift = [(v * ux, v * uy) for v in lap_offsets]
+
+    out = []
+    total = 0.0
+    prev = None
+    for k in range(laps):
+        sx, sy = shift[k]
+        for i in range(n):
+            px, py = sx, sy
+            if k > 0 and cum[i] < ramp:
+                bx, by = shift[k - 1]
+                w = _smoothstep(cum[i] / ramp)
+                px = bx + (sx - bx) * w
+                py = by + (sy - by) * w
+            if k == laps - 1 and cum[i] > lap_len - ramp:
+                # 最后一圈回到起始车道：否则多圈点列结束时的偏移与起点不同，
+                # 生成器补闭合边时会得到一条横跨 1~2.4 m 的斜线（实测 155~171°）。
+                w = 1.0 - _smoothstep((cum[i] - (lap_len - ramp)) / ramp)
+                px *= w
+                py *= w
+            pt = (single[i][0] + px, single[i][1] + py)
+            if prev is not None:
+                total += _dist(prev, pt)
+            out.append(pt)
+            prev = pt
+    info = dict(info)
+    info.update({
+        "laps": laps,
+        "lap_offsets_m": list(lap_offsets),
+        "single_lap_length_m": lap_len,
+        "total_length_m": total,
+        "offset_max_m": max([abs(v) for v in lap_offsets] + [info.get("offset_max_m") or 0.0]),
+        "n_points_out": len(out),
+        "seam_ramp_m": ramp,
+    })
+    return _to_bd(out, center, scale), info
 
 
 # ---------------------------------------------------------------- 度量

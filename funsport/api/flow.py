@@ -29,6 +29,11 @@ from ..logger import log, ok, warn, step, err
 # 里程变化 <0.5%。关掉它可以回到「逐顶点照抄高德折线」的旧行为。
 HUMANIZE_ROUTE = True
 
+# 固定起点（GCJ-02，lat,lon）：用户指定出发点（119.547725,39.925210 的经纬度倒序）。
+# 高德会把起点吸附到最近可步行道路（实测偏 27 m），所以实际轨迹从道路上的
+# 最近点起步；链路顺序是 起点 -> P1 -> ... -> Pn -> 起点，里程到目标即停。
+START_GCJ = (39.925210, 119.547725)
+
 
 def _ring_length(ring):
     """用与生成器一致的度量估算规划环长度。
@@ -173,10 +178,11 @@ def _resolve_params(dist, pace, cadence, auto, sel_dist,
 
     # ── 步频 ──
     if auto:
-        cmin = cfg.get("auto_cadence_min", 130)
-        cmax = cfg.get("auto_cadence_max", 170)
-        cadence_spm = random.uniform(cmin, cmax)
-        log.info(f"[auto] 步频 {cmin}~{cmax} spm 随机 → {cadence_spm:.0f} spm")
+        # 自动模式不再指定步频目标：生成器按经验式 171.43·(v/3)^0.28 由速度反推，
+        # 落盘步长再用 60v/cad 反算，两条经验式同时成立。旧实现随机 130~170 spm
+        # 会把步频整体缩放、破坏速度-步频的幂律关系。
+        cadence_spm = 0
+        log.info("[auto] 步频交给经验式按速度推算（不指定目标）")
     elif cadence_min or cadence_max:
         cmin = cadence_min or 130
         cmax = cadence_max or 170
@@ -225,19 +231,40 @@ def _build_amap_track(points, dist_m, pace_s, cadence, seed, start_ms):
     <0.5%），对外报告的 ring_length_m 仍按高德原折线算，口径不变；任何异常都
     退回原始折线，不让拟人化成为生成失败的新来源。
     """
-    ring, selection = api_loop.get_campus_loop(points, route_seed=seed, with_metadata=True)
+    ring, selection = api_loop.get_campus_loop(
+        points, route_seed=seed, with_metadata=True, start_gcj=START_GCJ)
     ring_len = _ring_length(ring)
+    if not math.isfinite(ring_len) or ring_len <= 0:
+        raise ValueError("高德规划路线为空或没有有效长度")
+    visit_len = _visit_all_points_m(ring, points)
+    if visit_len and dist_m < visit_len:
+        warn("目标距离 {:.0f}m 短于走到最后一个点位所需的 {:.0f}m，按后者生成".format(
+            dist_m, visit_len))
+        dist_m = visit_len
     route_ring = ring
     humanize_meta = {"enabled": False}
     if HUMANIZE_ROUTE:
         try:
-            route_ring, hinfo = track_humanize.humanize_route(ring, seed=seed)
+            # 多圈不是把同一圈重复交给生成器（那会让每圈逐点重合）：先把单圈
+            # 拟人化结果按圈拼接，每圈带独立横向漂移，再让生成器沿这条多圈
+            # 路径走到目标里程。圈数按目标里程 / 单圈长度取整，拟人化后长度
+            # 略短时补圈，避免生成器回绕到第 0 圈。
+            laps = max(1, int(math.ceil(dist_m / ring_len)))
+            route_ring, hinfo = track_humanize.humanize_laps(ring, seed=seed, laps=laps)
             route_ring = list(route_ring)
+            human_len = _ring_length(route_ring)
+            while human_len < dist_m and laps < 64:
+                laps += 1
+                route_ring, hinfo = track_humanize.humanize_laps(ring, seed=seed, laps=laps)
+                route_ring = list(route_ring)
+                human_len = _ring_length(route_ring)
             if len(route_ring) > 1 and route_ring[0] != route_ring[-1]:
                 route_ring.append(route_ring[0])   # 补齐闭合点：_ring_length 只累加相邻段
             humanize_meta = {
                 "enabled": True,
-                "humanized_ring_length_m": round(_ring_length(route_ring), 2),
+                "laps": laps,
+                "lap_offsets_m": [round(v, 3) for v in (hinfo.get("lap_offsets_m") or [])],
+                "humanized_ring_length_m": round(human_len, 2),
                 "corners_rounded": hinfo.get("corners_rounded"),
                 "u_turns": len(hinfo.get("uturns") or ()),
                 "offset_max_m": round(hinfo.get("offset_max_m") or 0.0, 3),
@@ -246,13 +273,6 @@ def _build_amap_track(points, dist_m, pace_s, cadence, seed, start_ms):
         except Exception as exc:                                # pragma: no cover - 兜底
             warn("[humanize] 拟人化失败，退回原始高德折线：{!r}".format(exc))
             route_ring = ring
-    if not math.isfinite(ring_len) or ring_len <= 0:
-        raise ValueError("高德规划路线为空或没有有效长度")
-    visit_len = _visit_all_points_m(ring, points)
-    if visit_len and dist_m < visit_len:
-        warn("目标距离 {:.0f}m 短于走到最后一个点位所需的 {:.0f}m，按后者生成".format(
-            dist_m, visit_len))
-        dist_m = visit_len
     duration = max(1, int(dist_m / 1000 * pace_s))
     avg = dist_m / duration
     fixed_avg = min(max(avg, SPEED_FLOOR + 0.1), SPEED_CEIL - 0.1)

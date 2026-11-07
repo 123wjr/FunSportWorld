@@ -278,12 +278,20 @@ def build_chain_route(start_gcj, points_gcj, target_m=DEFAULT_TARGET_M,
     road_bd = [gcj02_to_bd09(lat, lng) for lat, lng in chain_gcj]
     lap_len = ring_length(road_bd)
     plan = plan_mileage(leg_dists, lap_len, target_m)
-    route_bd, hinfo = hz.humanize_laps(road_bd, seed=seed, laps=plan["laps"])
+    dist = plan["target_m"]
+    laps = plan["laps"]
+    route_bd, hinfo = hz.humanize_laps(road_bd, seed=seed, laps=laps)
     route_bd = list(route_bd)
+    human_len = ring_length(route_bd)
+    # 拟人化后单圈会短几米；若目标里程刚好卡在整圈边界，必须再补一圈，
+    # 否则生成器会回绕到第 0 圈、与第一圈逐点重合。
+    while human_len < dist and laps < 64:
+        laps += 1
+        route_bd, hinfo = hz.humanize_laps(road_bd, seed=seed, laps=laps)
+        route_bd = list(route_bd)
+        human_len = ring_length(route_bd)
     if len(route_bd) > 1 and route_bd[0] != route_bd[-1]:
         route_bd.append(route_bd[0])
-    human_len = ring_length(route_bd)
-    dist = plan["target_m"]
     dur = max(1, int(round(dist / 1000.0 * pace_s)))
     if not start_ms:
         start_ms = int(time.time() * 1000)
@@ -303,7 +311,7 @@ def build_chain_route(start_gcj, points_gcj, target_m=DEFAULT_TARGET_M,
         "visit_all_points_m": round(plan["visit_all_points_m"], 2),
         "requested_m": round(plan["requested_m"], 2),
         "target_m": round(plan["target_m"], 2),
-        "laps": plan["laps"],
+        "laps": laps,
         "raised_to_visit": plan["raised"],
         "humanize": hinfo,
         "start_gcj": "%.6f,%.6f" % start_gcj,
@@ -315,7 +323,7 @@ def build_chain_route(start_gcj, points_gcj, target_m=DEFAULT_TARGET_M,
         "route_bd": route_bd, "route_gcj": route_gcj,
         "chain": chain_meta,
         "dist_m": round(total, 3), "dur_s": round(float(track.get("totalTime") or 0.0), 3),
-        "laps": plan["laps"], "seed": seed,
+        "laps": laps, "seed": seed,
     }
 
 

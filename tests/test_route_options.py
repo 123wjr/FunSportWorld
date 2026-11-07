@@ -9,6 +9,7 @@ from tests.support import IsolatedCase
 from tests.plan_fixture import fake_client, sample_ring
 from funsport import config
 from funsport.api import campus_loop as loop, flow
+from funsport.coordinates import gcj02_to_bd09
 from funsport.run_plan import format_plan
 
 
@@ -65,6 +66,7 @@ class RoadOptionTests(IsolatedCase):
                 patch.object(flow.api_submit, "submit_record") as submit, \
                 patch.object(flow.api_obs, "upload_both_keys") as upload, \
                 patch.object(loop, "get_amap_key", side_effect=AssertionError("应命中候选缓存")), \
+                patch.object(flow, "START_GCJ", None), \
                 patch.object(flow.log, "disabled", True):
             plan = flow.prepare_run_plan(fake_client(), dist=2, pace=400, cadence=160,
                                          start_ms=start, seed=seed)
@@ -81,6 +83,35 @@ class RoadOptionTests(IsolatedCase):
         get.assert_called_once()
         self.assertEqual(get.call_args.kwargs["params"]["alternative_route"], 3)
         response.__exit__.assert_called_once()
+
+    def test_auto_mode_hands_cadence_to_empirical_curve(self):
+        """--auto 不再随机步频目标：交给 171.43·(v/3)^0.28 由速度反推。"""
+        _, _, cadence = flow._resolve_params(
+            dist=0, pace=0, cadence=0, auto=True, sel_dist=2200,
+            dist_min=0, dist_max=0, pace_min=0, pace_max=0,
+            cadence_min=0, cadence_max=0, min_dist=0)
+        self.assertEqual(cadence, 0)
+        _, _, manual = flow._resolve_params(
+            dist=2.0, pace=400, cadence=160, auto=False, sel_dist=2200,
+            dist_min=0, dist_max=0, pace_min=0, pace_max=0,
+            cadence_min=0, cadence_max=0, min_dist=0)
+        self.assertEqual(manual, 160)
+
+    def test_start_anchor_becomes_first_leg_and_ring_origin(self):
+        """给定固定起点时多请求一段「起点 -> P1」，环从起点开始。"""
+        start = (39.925210, 119.547725)
+        base = sample_ring()[:-1]
+        legs = self.legs(count=1, checkpoints=[start] + base)
+        with patch.object(loop, "get_amap_key", return_value="fixture"), \
+                patch.object(loop, "_fetch_route_legs", return_value=legs) as fetch, \
+                patch.object(loop.time, "sleep"), patch.object(loop.log, "disabled", True):
+            ring, selection = loop.get_campus_loop(self.points(), route_seed=0,
+                                                  with_metadata=True, start_gcj=start)
+        anchors = fetch.call_args.args[0]
+        self.assertEqual(anchors[0], start)
+        self.assertEqual(len(anchors), len(base) + 1)
+        self.assertLess(loop.dist_m(ring[0], gcj02_to_bd09(*start)), 1e-6)
+        self.assertEqual(selection["segment_candidates"], [1] * (len(base) + 1))
 
     def test_invalid_and_duplicate_options_do_not_count(self):
         """坏的首条和重复路线不掩盖有效备选，也不虚报道路数量。"""
@@ -224,6 +255,7 @@ class RoadOptionTests(IsolatedCase):
         context = {"uid": 1, "unid": "1", "anchor": [30.6, 104.1], "runAreaId": None}
         config.save_json(config.POINTS_CACHE, {"points": self.points(), "context": context, "metadata": {}, "ts": 1})
         with patch.object(flow.log, "disabled", True), \
+                patch.object(flow, "START_GCJ", None), \
                 patch.object(loop, "get_amap_key", side_effect=AssertionError("缓存不能请求Key")):
             first = flow.prepare_route_preview(fake_client(), 2, 400, 160, seed=1)
             second = flow.prepare_route_preview(fake_client(), 2, 400, 160, seed=2)

@@ -448,10 +448,14 @@ def _validated_ring(value, checkpoints):
         return None
 
 
-def get_campus_loop(points, force_rebuild=False, route_seed=0, with_metadata=False):
+def get_campus_loop(points, force_rebuild=False, route_seed=0, with_metadata=False,
+                    start_gcj=None):
     """从完整候选缓存按种子选路，不把整个闭环固定成同一道路。
 
     points: fetch_points 返回的原始点位（有效 glat/glon 优先）
+    start_gcj: 可选固定起点（GCJ-02 lat,lon）。给了就把它插在点位序列最前面，
+        链路变成「起点 -> P1 -> ... -> Pn -> 起点」，环也从起点开始；不给则
+        沿用「第一个点位起步」的旧行为。
     默认返回BD坐标数组；with_metadata=True时同时返回候选数量和道路指纹。
     """
     cache_path = app_config.DATA_DIR / "campus_loop_bd.json"
@@ -460,6 +464,17 @@ def get_campus_loop(points, force_rebuild=False, route_seed=0, with_metadata=Fal
     checkpoints_gcj = [p[1] for p in normalized]
     if len(checkpoints_bd) < 2 or len(set(checkpoints_bd)) < 2:
         raise RuntimeError(f"打卡点不足（{len(checkpoints_bd)} 个），无法生成环")
+
+    # 起点作为第 0 个锚点：legs 数量变成 点位+1，最后一段是 Pn -> 起点。
+    if start_gcj is not None:
+        start_bd = gcj02_to_bd09(float(start_gcj[0]), float(start_gcj[1]))
+        anchors_bd = [start_bd] + checkpoints_bd
+        anchors_gcj = [(float(start_gcj[0]), float(start_gcj[1]))] + checkpoints_gcj
+    else:
+        anchors_bd = list(checkpoints_bd)
+        anchors_gcj = list(checkpoints_gcj)
+    checkpoints_bd = anchors_bd
+    checkpoints_gcj = anchors_gcj
 
     fp = _points_fingerprint(checkpoints_gcj)
 

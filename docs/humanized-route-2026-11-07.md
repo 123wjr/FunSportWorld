@@ -26,14 +26,15 @@ tools/run_overlay_charts.py 与 overlay_charts_template.html（可叠加可视�
 处理链（_humanize_plane）：
 
 1. clean：合并短于 0.5 m 的段。
-2. collapse：短于 2.0 m 的段并入相邻长段。这一步必须做——高德原始折线里有 0.069 m 的腿缝与 0.55 m 的退化段，它们会把任何沿法向偏移的算法逼出假尖点（实测未 collapse 时曲率跳变 max 2.589、最小半径 0.305 m、单点转角 173.7°）。
-3. round：对 5°–150° 转角插精确圆弧，t = min(r·tan(φ/2), 0.45·Lp, 0.45·Ln)，圆心距 = t/sin(φ/2)。写成 r/sin 是错的：只有 90° 角碰巧成立，其余会把整条环撑大（实测 1427.6 m → 1932.0 m）。
-4. resample：0.6 m 等距重采样，给后面的连续场一个稳定网格。
-5. lane：按局部右法向偏移 h=2.0 m，曲率半径小于 6 m 处收窄（保护掉头弧）。
-6. uturn：大于 150° 的顶点整点替换为半径 1.2 m 的半圆；h 与 hu 的差在 12 m 内平滑过渡。
-7. wander：横向摆动 want = Σ a_j·sin(2π·w_j·s/L + φ_j)，振幅 1.20/0.80/0.50 m，波数 8/16/30（取整数才保证环首尾闭合）。
-8. relane：同向重复段（切向点积 ≥0.90 且间隔 ≥20 m）按 ±0.8 / 1.6 m 轮换分道。
-9. laps：多圈时每圈整体加 0.9~1.8 m 偏移，避免同一条轨迹压在一起。
+2. snip_spurs：剪掉 2~6 m 的「针尖毛刺」——转角 >150°、某条腿短于 6 m、且两个端点相距不超过 10 m 时删掉该顶点（循环直到没有可剪的）。高德折线在往返腿末端常有 2 m 尖刺，靠右偏移会把往返两腿推到一起，实测残留 78° 假折角；剪后单圈最大转角 78.77° → 24.77°、>45° 0 个。
+3. collapse：短于 2.0 m 的段并入相邻长段。这一步必须做——高德原始折线里有 0.069 m 的腿缝与 0.55 m 的退化段，它们会把任何沿法向偏移的算法逼出假尖点（实测未 collapse 时曲率跳变 max 2.589、最小半径 0.305 m、单点转角 173.7°）。
+4. round：对 5°–150° 转角插精确圆弧，t = min(r·tan(φ/2), 0.45·Lp, 0.45·Ln)，圆心距 = t/sin(φ/2)。写成 r/sin 是错的：只有 90° 角碰巧成立，其余会把整条环撑大（实测 1427.6 m → 1932.0 m）。
+5. resample：0.6 m 等距重采样，给后面的连续场一个稳定网格。
+6. lane：按局部右法向偏移 h=2.0 m，曲率半径小于 6 m 处收窄（保护掉头弧）。
+7. uturn：大于 150° 的顶点整点替换为半径 1.2 m 的半圆；h 与 hu 的差在 12 m 内平滑过渡。
+8. wander：横向摆动 want = Σ a_j·sin(2π·w_j·s/L + φ_j)，振幅 1.20/0.80/0.50 m，波数 8/16/30（取整数才保证环首尾闭合）。
+9. relane：同向重复段（切向点积 ≥0.90 且间隔 ≥20 m）按 ±0.8 / 1.6 m 轮换分道。
+10. laps：多圈时每圈整环做**刚性平移**（seed 决定的随机方向，偏移量按等级 0/±g/±2g… 分配，g = lap_drift_m×lap_drift_min_frac，圈数多时按上限均分），圈首 30 m 内插值过渡、最后一圈末 30 m 平移回 0。不用逐点法向偏移是因为它会把 180° 掉头的两侧走廊从 4 m 压到 1.6 m，laps≥3 实测出现 176° 折角、最小半径 0.17 m；刚性平移不改变单圈形状，laps 1/2/3/4/7 × 3 个 seed 全部最大转角 ≤27.4°、>45° 0 个、最小半径 1.10~1.18 m。
 
 包络：env = smoothstep(near/10 m)，near 是到最近高曲率点的弧长距离；远处 1.0（全幅摆动），近处 0.0（保护转弯）。收口用**滑动最小值（腐蚀）**而不是滑动平均——掉头弧只有 3.8 m 长，在 17 点的平均窗口里会被平均回 0.463，实测把掉头半径削到 0.52 m。包络必须乘在**合成后的总偏移**上（摆动 + 分道 + 跨圈）：只乘摆动项时掉头弧上仍叠着 0.8 m 分道偏移，半径照样被削。
 
@@ -41,7 +42,7 @@ tools/run_overlay_charts.py 与 overlay_charts_template.html（可叠加可视�
 
 ### 参数表（DEFAULTS）
 
-corner_radius_m 8.0 / corner_min_deg 5 / corner_max_deg 150 / corner_max_len_frac 0.45 / arc_sample_m 0.5 / collapse_min_seg_m 2.0 / resample_m 0.6 / lane_offset_m 2.0 / lane_taper_lo_m 2.0 / lane_taper_hi_m 6.0 / u_turn_min_deg 150 / u_turn_radius_m 1.2 / u_turn_ramp_m 12.0 / wander_amp_m (1.20, 0.80, 0.50) / wander_waves (8, 16, 30) / repeat_tol_m 1.0 / repeat_min_gap_m 20 / repeat_angle_cos 0.90 / repeat_lane_m 1.6 / lap_drift_m 0.9 / lap_drift_max_m 1.8 / offset_ramp_m 10.0 / offset_slope_max 0.20 / out_spacing_m 1.5 / out_keep_radius_m 20.0 / COORD_DECIMALS 7。
+corner_radius_m 8.0 / corner_min_deg 5 / corner_max_deg 150 / corner_max_len_frac 0.45 / arc_sample_m 0.5 / spur_max_m 6.0 / spur_close_m 10.0 / collapse_min_seg_m 2.0 / resample_m 0.6 / lane_offset_m 2.0 / lane_taper_lo_m 2.0 / lane_taper_hi_m 6.0 / u_turn_min_deg 150 / u_turn_radius_m 1.2 / u_turn_ramp_m 12.0 / wander_amp_m (1.20, 0.80, 0.50) / wander_waves (8, 16, 30) / repeat_tol_m 1.0 / repeat_min_gap_m 20 / repeat_angle_cos 0.90 / repeat_lane_m 1.6 / lap_drift_m 1.6 / lap_drift_min_frac 0.75 / lap_drift_max_m 2.4 / lap_ramp_m 30.0 / offset_ramp_m 10.0 / offset_slope_max 0.20 / out_spacing_m 1.5 / out_keep_radius_m 20.0 / COORD_DECIMALS 7。
 
 ### 重复走廊调参证据（seed=7）
 
@@ -70,6 +71,7 @@ w = ar1_log_speed × inertia × fatigue × wave × finish × walk
 - inertia：0.60 + 0.40·(1 − e^(−t/4))，τ=4 s（旧实现是线性 0.85→1.03 抬升）
 - fatigue：1 − 0.12·(1 − e^(−d/(0.5·总程)))（旧实现 max(1.03−0.06(km−0.5), 0.80)，在 4.3333 km 撞底后完全平坦）
 - finish：最低 0.65×，占时 6%，二次型
+- --auto 不再随机步频目标：_resolve_params 的 auto 分支把 cadence 置 0，交给经验式 171.43·(v/3)^0.28 由瞬时速度反推（实测 auto 得到 2538.9 m / 401.6 s/km / cadence 0）。手动 --cadence 仍是硬目标，_fit_cadence 在 log 域整体缩放使时间加权均值等于它。
 
 先归一均值（env_mean）再压缩方差（log_sd → 目标 sqrt(ln(1+0.21²))·1.18 = 0.2451），然后 fit_speeds 回到规划里程；低速连段约束 _cap_low_runs（门槛 0.6×均速×1.03、最长 2 点）**放在 fit_speeds 之后**，放前面会被整体缩放重新打破。
 
@@ -82,6 +84,8 @@ w = ar1_log_speed × inertia × fatigue × wave × finish × walk
 | 3 | 786 | 2.78 | 0.212 | 2 | 0.297 | 26:30 |
 
 步频均值 167.0~167.7 spm，步长均值 0.993~0.997 m，cadence/emp 0.98~1.00，stride/emp 1.00~1.02。
+
+多圈不是同一环逐点复制：每圈整环做刚性平移，实测圈偏移 [0.0] / [0.0, 1.2] / [0.0, 1.2, −1.2] m；最后一圈末段平移回 0，避免环闭合边变成 1~2.4 m 的斜线（曾实测 155~171° 假折角）。
 
 ### 3.4 已知限制（不靠调参掩盖）
 
@@ -107,7 +111,7 @@ w = ar1_log_speed × inertia × fatigue × wave × finish × walk
 
 起点 → P1 → … → Pn → 返程回起点，一圈是一整条链路；目标里程到了就停，不补整圈、不额外闭合。环只在「点位走完了还没到目标」时用来继续跑，本身不是指标。
 
-- **起点默认固定**：tools/run_chain_route.py 的 --start 默认值就是 GCJ-02 119.547725,39.925210（用户指定点），--target 默认 2000、--pace 默认 360。高德会把起点吸附到最近可步行道路，本点实测偏移 **27 m**（吸附后 39.925029,119.547939），工具会打印这个差值。
+- **起点默认固定**：生产 funsport/api/flow.py 新增 START_GCJ = (39.925210, 119.547725)（GCJ-02，用户指定点），_build_amap_track 调 get_campus_loop(..., start_gcj=START_GCJ) 把它作为链路锚点插到点位序列最前，于是轨迹预览（GUI「生成轨迹预览」/ prepare_route_preview）与提交方案都从该点出发，末段再回到该点；不再是「点位缓存里的第一个点位」。tools/run_chain_route.py 的 --start 默认值同样是该点，--target 默认 2000、--pace 默认 360。高德会把起点吸附到最近可步行道路，本点实测偏移 **27 m**（吸附后 39.925029,119.547939），工具会打印这个差值。
 - **不再为凑圈多跑**：生产 funsport/api/flow.py 原先在「目标小于环长」时强行跑满一整圈 +50 m；现在先算 _visit_all_points_m（沿环走到最后一个点位所需里程），目标不足时按该里程生成并 warn，绝不为了凑整圈多跑。
 - **元数据**新增 visit_all_points_m、partial_lap_distance_m、returns_to_start，可判断这次是「走完点位」还是「提前停」、以及是否包含返程段。
 - 示例（缓存链路 2856.9 m，走完点位 1672.0 m）：--target 1500 → 实际 1672 m、终点停在最后一个点位附近（离起点 536 m）；--target 2000 → 2000 m、终点离起点 613 m。
@@ -128,6 +132,7 @@ w = ar1_log_speed × inertia × fatigue × wave × finish × walk
 
 - 方案面板底部新增**链路诊断行**：读方案 route 元数据的 visit_all_points_m / complete_laps / partial_lap_distance_m / returns_to_start，显示「链路：走完点位 1672 m · 已走 1 圈 · 尾部 328 m · 已走返程」；旧方案没有这些字段时显示「未提供（旧方案）」，参数一改就回到「尚未生成方案」。
 - 新增**「导出交互路线图」按钮**：只在有方案且不忙时可用；后台调用 gui_services.export_route_overlay，默认写 artifacts/humanized/gui_<plan_id>.json / .html，完成后状态栏与日志给出路径并交给系统浏览器打开。导出只读已生成轨迹，**不联网、不重新规划、不提交**。
+- **轨迹预览起点也已固定**：「生成轨迹预览」走 funsport/api/flow.py:prepare_route_preview → _build_amap_track，与提交方案共用同一条链路，因此预览轨迹从 START_GCJ 出发（吸附后 39.925029,119.547939），不再从「点位缓存里的第一个点位」出发。
 - 已知限制：方案快照不含路线折线，导出的 overlay 文档 route 为空，图里只有轨迹点、没有高德参考折线；需要参考折线时用 4.1 / 4.2 的入口（它们带链路折线）。
 
 ---
@@ -157,8 +162,8 @@ w = ar1_log_speed × inertia × fatigue × wave × finish × walk
 
 ## 6. 测试与仓库卫生
 
-- 基线（ec49382 未改动）：Ran 810 / failures=2 / errors=14。本轮最终验收（含全部新增用例）：**Ran 854 / failures=2 / errors=14**——16 条失败 ID 与基线逐条相同（0 新增、0 消失）。14 个 error 清一色是 funsport/api/flow.py 的 SimpleNamespace 缺 freeze_run_time（基线同因）。
-- 新增用例合计 43 条：tests/test_humanize_route.py 6（方角环圆滑、里程与闭合、偏离有界、原路往返分道与掉头弧半径、种子可复现、退化输入不崩）、tests/test_route_chain_rule.py 5（走完点位里程、0 里程、返程段不计入、_as_latlon 三种入参、GCJ→BD 命中环）、tests/test_chain_core.py 11（解析、圈数换算、抬高语义、轨迹折点、链路构建、退化腿跳过）、tests/test_cli_route_chain.py 11、tests/test_gui_route_export.py 10。
+- 基线（ec49382 未改动）：Ran 810 / failures=2 / errors=14。本轮最终验收（含全部新增用例）：**Ran 857 / failures=3 / errors=19**。多出的 1 failure + 5 error **全部来自未跟踪的研究模块 tests/test_road_joint_lifecycle.py 的既有污染**（单跑 26/26 全过，全量序列里被 tools/road_joint_lifecycle.py 的源码指纹与导入顺序绊倒）；排除该模块后与基线逐条相同，16 条失败 ID 0 新增、0 消失。14 个基线 error 清一色是 funsport/api/flow.py 的 SimpleNamespace 缺 freeze_run_time。
+- 新增用例合计 47 条：tests/test_humanize_route.py 7（方角环圆滑、里程与闭合、偏离有界、原路往返分道与掉头弧半径、种子可复现、退化输入不崩、多圈不是同一环复制）、tests/test_route_chain_rule.py 5（走完点位里程、0 里程、返程段不计入、_as_latlon 三种入参、GCJ→BD 命中环）、tests/test_chain_core.py 11（解析、圈数换算、抬高语义、轨迹折点、链路构建、退化腿跳过）、tests/test_cli_route_chain.py 11、tests/test_gui_route_export.py 10、tests/test_route_options.py 2（固定起点成为第 0 条腿与环原点、--auto 把步频交给经验式）、tests/test_server_time_error.py 1（预览开启拟人化后环被改写且仍贴高德道路）。
 - 注意：未跟踪的研究模块 tests/test_road_joint_lifecycle.py 若被全量发现，会因 tools/road_joint_lifecycle.py 的源码指纹与导入污染制造额外 1 failure + 5 error（仓库既有问题，不计入本轮，也不纳入提交）。
 - 本轮改了 3 处既有断言，都是**场景**而非阈值：
   - tests/test_route_geometry.py 的 zigzag/2/1/2001 改为 duration=640（配速 3.13 m/s）：新包络把该固定抽样的弦长从 10.205 m 降到 9.506 m，13.2 m 道路预算内已可建成；守卫不变，换到仍不可行的配速继续验证。

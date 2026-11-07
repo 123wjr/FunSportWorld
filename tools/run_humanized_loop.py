@@ -186,12 +186,13 @@ def ring_length(points_bd):
     return arcs[-1] if arcs else 0.0
 
 
-def build_track(points_bd, laps, pace_s_per_km, seed, cadence_target, start_ms,
+def build_track(route_bd, pace_s_per_km, seed, cadence_target, start_ms,
                 sample_period_s=2.0):
-    ring_len = ring_length(points_bd)
-    dist = ring_len * laps
+    """沿一条多圈点列跑到它的末尾（不重复同一圈）。"""
+    ring_len = ring_length(route_bd)
+    dist = ring_len
     dur = dist / 1000.0 * pace_s_per_km
-    tr = gen.build(dist, round(dur), seed, start_ms, points_bd, ordered_path=True,
+    tr = gen.build(dist, round(dur), seed, start_ms, route_bd, ordered_path=True,
                    cadence_target=cadence_target, sample_period_s=sample_period_s,
                    distance_mode="arc")
     return tr, ring_len, dist, dur
@@ -312,20 +313,33 @@ def run(laps, seed, pace, cadence_target, out_dir, want_charts, title, start_ms,
                  % (road_len, hstats["length_m"]))
 
     for lap in laps:
-        tr, ring_len, dist, dur = build_track(pts_bd, lap, pace, seed, cadence_target,
+        # 多圈不是把同一圈交给生成器（那会逐点重合）：humanize_laps 先把单圈
+        # 结果按圈拼接，每圈整体平移一小段，再让生成器跑到这条路径的末尾。
+        route_bd, linfo = hz.humanize_laps(ring, seed=seed, laps=lap)
+        route_bd = list(route_bd)
+        if route_bd and route_bd[0] != route_bd[-1]:
+            route_bd.append(route_bd[0])
+        lapstats = hz.analyze_route(route_bd, reference_bd=ring)
+        tr, ring_len, dist, dur = build_track(route_bd, pace, seed, cadence_target,
                                               start_ms, sample_period_s)
-        pts, tlen = track_to_points(tr, pts_bd)
+        lines.append("laps=%d：圈偏移 %s m，路径长 %.1f m，转角 p90 %.2f / max %.2f deg，"
+                     "minR %.3f m"
+                     % (lap, [round(v, 2) for v in linfo["lap_offsets_m"]],
+                        lapstats["length_m"], lapstats["turn_p90_deg"],
+                        lapstats["turn_max_deg"], lapstats["min_radius_m"]))
+        pts, tlen = track_to_points(tr, route_bd)
         # 出图统一 GCJ-02：generator 落盘的 gLat/gLng 是 BD-09，Keep / 高德 / 地图
         # 都是 GCJ-02，不转会整体偏 ~870 m（本起点实测）。
         for p in pts:
             g = bd09_to_gcj02(p["lat"], p["lng"])
             p["lat"], p["lng"] = round(g[0], 7), round(g[1], 7)
         road_gcj = [bd09_to_gcj02(lat, lng) for lat, lng in ring]
-        route_gcj = [bd09_to_gcj02(lat, lng) for lat, lng in pts_bd]
+        route_gcj = [bd09_to_gcj02(lat, lng) for lat, lng in route_bd]
         doc = overlay_doc("laps=%d" % lap, pts, road_gcj, route_gcj, lap, ring_len, dist, dur,
                           seed, cadence_target,
                           {"selection_variant": selection["selected_variant"],
-                           "humanize_min_radius_m": round(hstats["min_radius_m"], 3),
+                           "humanize_min_radius_m": round(lapstats["min_radius_m"], 3),
+                           "lap_offsets_m": [round(v, 3) for v in linfo["lap_offsets_m"]],
                            "road_length_m": round(road_len, 3),
                            "pace_s_per_km": pace})
         docs.append(doc)
