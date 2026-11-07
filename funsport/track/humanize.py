@@ -81,12 +81,10 @@ DEFAULTS = {
     "spur_max_m": 6.0,
     "spur_close_m": 10.0,
     # 8. 多圈
-    # 每圈换一条「车道」：步长至少 0.75 倍，保证相邻两圈不会因为随机游走抽到
-    # 接近 0 的增量而重新压在一起（实测 0.9/1.8 时第 2 圈只偏 -0.32 m）。
-    "lap_drift_m": 1.6,            # 每圈偏移的随机步长
-    "lap_drift_min_frac": 0.75,    # 步长下限（× lap_drift_m）
-    "lap_drift_max_m": 2.4,        # 偏移绝对值上限
-    "lap_ramp_m": 30.0,            # 接缝处斜坡长度
+    # 每圈用独立子种子重新走一遍完整拟人化链（摆动相位、圆角半径都重新取），
+    # 而不是把第一圈刚性复制若干份 —— 后者会让每圈的走线、圆角、摆动完全一样。
+    "lap_corner_jitter": 0.15,     # 每圈圆角半径相对目标的随机抖动（±15%）
+    "lap_ramp_m": 30.0,            # 接缝处平滑长度（把上一圈终点接到本圈起点）
     "clean_min_seg_m": 0.5,
     # 9. 输出抽稀
     # BD 只留 COORD_DECIMALS 位小数（7 位 ≈ 1.1 cm）。若输出点间距只有
@@ -582,8 +580,8 @@ def _relane_field(P, step, opt):
 
 # ---------------------------------------------------------------- 主流程
 
-def _humanize_plane(P, opt, lap_offsets):
-    """平面内完整处理链。P 为纯环点列，lap_offsets 为逐圈常值偏移。"""
+def _humanize_plane(P, opt):
+    """平面内完整处理链。P 为纯环点列；多圈由 humanize_laps 逐圈独立调用。"""
     P = _clean(P, opt["clean_min_seg_m"])
     P = _snip_spurs(P, opt)
     P = _clean(P, opt["collapse_min_seg_m"])
@@ -600,25 +598,13 @@ def _humanize_plane(P, opt, lap_offsets):
     env = _offset_envelope(P, step, opt)
     want = _wander_raw(P, step, total, opt)
     relane, pass_idx = _relane_field(P, step, opt)
-    lap_field = [0.0] * n
-    m = len(lap_offsets)
-    if m > 1:
-        per = n / m
-        ramp = max(1.0, opt["lap_ramp_m"] / step)
-        for i in range(n):
-            j = min(m - 1, int(i / per))
-            base = lap_offsets[j]
-            nxt = lap_offsets[(j + 1) % m]
-            u = ((i - j * per) / per - (1.0 - min(ramp, per) / per)) / (min(ramp, per) / per)
-            lap_field[i] = base + (nxt - base) * _smoothstep(u)
 
     # 包络必须作用在**合成后的总偏移**上，不能只乘摆动项：掉头弧半径只有
     # u_turn_radius_m（1.2 m），若在弧上还叠一个 ±0.8 m 的分道偏移，半径会被
-    # 削到 0.4 m（实测 seed=0 掉头处 minR=0.52、单点转角 61°）。把 relane 与
-    # 圈间偏移一起收进包络后，弧上偏移归零、半径还原，而直线段的分道能力不受
-    # 影响（包络只在离高曲率点 ~offset_ramp_m 以内衰减）。
+    # 削到 0.4 m（实测 seed=0 掉头处 minR=0.52、单点转角 61°）。把 relane 一起
+    # 收进包络后，弧上偏移归零、半径还原，而直线段的分道能力不受影响。
     # 另外横向偏移场必须先限斜率再施加，否则场里的台阶会被几何放大成假折角。
-    raw_off = [env[i] * (want[i] + relane[i] + lap_field[i]) for i in range(n)]
+    raw_off = [env[i] * (want[i] + relane[i]) for i in range(n)]
     off = _limit_slope(raw_off, step, opt["offset_slope_max"])
 
     out = []
@@ -641,7 +627,6 @@ def _humanize_plane(P, opt, lap_offsets):
         "offset_slope_max": max((abs(off[(i + 1) % n] - off[i]) / step for i in range(n)), default=0.0),
         "relane_max_m": max(abs(v) for v in relane) if relane else 0.0,
         "pass_index_max": max(pass_idx) if pass_idx else 0,
-        "lap_offsets_m": list(lap_offsets),
     }
     return out, info
 
@@ -660,7 +645,7 @@ def humanize_route(points_bd, seed=0, **opt):
     o.update(opt)
     o.setdefault("_phases", _seed_phases(seed, o))
     P, center, scale = _to_plane(_cyclic(points_bd))
-    out, info = _humanize_plane(P, o, [0.0])
+    out, info = _humanize_plane(P, o)
     pts = _to_bd(out, center, scale)
     info["laps"] = 1
     return pts, info
@@ -675,87 +660,91 @@ def _arc_positions(P):
     return cum, total
 
 
-def humanize_laps(points_bd, seed=0, laps=1, **opt):
-    """多圈拟人化：单圈结果按圈拼接，每圈带独立的横向偏移。
+def _lap_seed(seed, k):
+    """第 k 圈的子种子：k=0 用原种子（单圈与 humanize_route 完全一致）。"""
+    if k == 0:
+        return int(seed)
+    return (int(seed) * 7919 + k * 104729) & 0x7FFFFFFF
 
-    单圈先按 humanize_route 的完整链处理（圆角、靠右、摆动、掉头），再复制
-    laps 份拼成一条**多圈路径**：第 0 圈不动，其后每圈整体平移一小段
-    （lap_drift_m / lap_drift_max_m），圈首 lap_ramp_m 内平滑过渡。
-    偏移量取「互不重合的等级」（0, ±g, ±2g…），保证任意两圈至少相隔 g；方向
-    由 seed 定，所有圈共用一个平移方向 —— 刚性平移不改变单圈形状，掉头半径
-    与走廊宽度都保持原样（按逐点法向偏移会把 180° 掉头两侧的走廊从 4 m 压到
-    1.6 m，弧与原路对不上，实测出现 176° 假折角）。
-    最后一圈末尾 lap_ramp_m 内平移回 0：否则点列末尾的偏移与起点差 1~2.4 m，
-    调用方补闭合边时会得到一条 155~171° 的斜线。
-    返回点列长度为单圈弧长的 laps 倍（不含闭合段），调用方必须保证
-    目标里程不超过它，否则生成器会回绕到第 0 圈。
+
+def humanize_laps(points_bd, seed=0, laps=1, **opt):
+    """多圈拟人化：每圈按新路线独立重跑完整链，再在接缝处平滑拼接。
+
+    与「拟人化一圈后刚性平移复制」不同，这里第 k 圈用独立子种子
+    （_lap_seed）重新生成：摆动相位、圆角半径（±lap_corner_jitter）都重新取，
+    所以每一圈的走线、圆角、摆动都不一样，拼起来的轨迹不会看出重复。
+
+    拼接方式：第 k≥1 圈整体先不移动，圈首 lap_ramp_m 内把它平滑接到上一圈
+    的终点（位移量 = 上一圈末点 − 本圈首点，按 smoothstep 衰减到 0），这样
+    接缝处位置连续，而本圈其余部分保持自己独立的几何。第 0 圈用原种子，
+    因此 laps=1 与 humanize_route(seed) 结果一致。
+
+    返回点列长度为各圈弧长之和（不含闭合段）；调用方按需补闭合点。若调用方
+    只跑其中一段里程（生成器按目标里程截断），拼接方式不会影响那段几何。
     """
     import random
 
     o = dict(DEFAULTS)
     o.update(opt)
-    o.setdefault("_phases", _seed_phases(seed, o))
     laps = max(1, int(laps))
-    rng = random.Random(seed)
-    drift_max = float(o["lap_drift_max_m"])
-    # 用「互不重合的车道等级」而不是随机游走：随机游走只保证与上一圈有差，
-    # 第 3 圈可能又漂回第 1 圈的取值（实测 seed=7 的第 3 圈只差 0.13 m）。
-    # 等级取 0, ±g, ±2g…，任意两圈至少相隔 g；圈数多到放不下时按可用范围
-    # 收缩 g，而不是让偏移冲出 ±lap_drift_max_m。
-    gap = o["lap_drift_m"] * o["lap_drift_min_frac"]
-    if laps > 1:
-        gap = min(gap, 2.0 * drift_max / (laps - 1))
-    levels = [0.0]
-    k = 1
-    while len(levels) < laps:
-        levels.append(k * gap)
-        if len(levels) < laps:
-            levels.append(-k * gap)
-        k += 1
-    tail = levels[1:]
-    rng.shuffle(tail)
-    lap_offsets = [0.0] + tail
     P, center, scale = _to_plane(_cyclic(points_bd))
-    single, info = _humanize_plane(P, o, [0.0])
-    n = len(single)
-    cum, lap_len = _arc_positions(single)
-    ramp = max(1.0, min(o["lap_ramp_m"], lap_len * 0.45))
-    angle = rng.uniform(0.0, 2.0 * math.pi)
-    ux, uy = math.cos(angle), math.sin(angle)
-    shift = [(v * ux, v * uy) for v in lap_offsets]
+    jitter = max(0.0, float(o["lap_corner_jitter"]))
+    base_radius = float(o["corner_radius_m"])
 
-    out = []
-    total = 0.0
-    prev = None
+    singles = []
+    infos = []
+    lap_seeds = []
+    lap_radii = []
     for k in range(laps):
-        sx, sy = shift[k]
-        for i in range(n):
-            px, py = sx, sy
-            if k > 0 and cum[i] < ramp:
-                bx, by = shift[k - 1]
-                w = _smoothstep(cum[i] / ramp)
-                px = bx + (sx - bx) * w
-                py = by + (sy - by) * w
-            if k == laps - 1 and cum[i] > lap_len - ramp:
-                # 最后一圈回到起始车道：否则多圈点列结束时的偏移与起点不同，
-                # 生成器补闭合边时会得到一条横跨 1~2.4 m 的斜线（实测 155~171°）。
-                w = 1.0 - _smoothstep((cum[i] - (lap_len - ramp)) / ramp)
-                px *= w
-                py *= w
-            pt = (single[i][0] + px, single[i][1] + py)
-            if prev is not None:
-                total += _dist(prev, pt)
-            out.append(pt)
-            prev = pt
-    info = dict(info)
+        lap_seed = _lap_seed(seed, k)
+        lap_seeds.append(lap_seed)
+        ok = dict(o)
+        ok["_phases"] = _seed_phases(lap_seed, ok)
+        if k > 0 and jitter > 0.0:
+            rng = random.Random(lap_seed ^ 0x5DEECE66D)
+            ok["corner_radius_m"] = base_radius * rng.uniform(1.0 - jitter, 1.0 + jitter)
+        lap_radii.append(ok["corner_radius_m"])
+        single, info = _humanize_plane(P, ok)
+        singles.append(single)
+        infos.append(info)
+
+    out = list(singles[0])
+    seams = []
+    ramp = max(1.0, float(o["lap_ramp_m"]))
+    for k in range(1, laps):
+        nxt = singles[k]
+        cum, lap_len = _arc_positions(nxt)
+        rr = max(1.0, min(ramp, lap_len * 0.2))
+        dx = out[-1][0] - nxt[0][0]
+        dy = out[-1][1] - nxt[0][1]
+        seams.append(math.hypot(dx, dy))
+        # 首点与上一圈末点重合，跳过它避免零长段；其余点在 rr 内平滑衰减位移。
+        for i in range(1, len(nxt)):
+            w = 1.0 - _smoothstep(min(cum[i] / rr, 1.0)) if cum[i] < rr else 0.0
+            out.append((nxt[i][0] + dx * w, nxt[i][1] + dy * w))
+
+    total = sum(_dist(out[i], out[i + 1]) for i in range(len(out) - 1))
+    lap_lengths = [_arc_positions(s)[1] for s in singles]
+    uturns = []
+    for k, info in enumerate(infos):
+        for u in info.get("uturns") or ():
+            u = dict(u)
+            u["lap"] = k
+            uturns.append(u)
+    info = dict(infos[0])
     info.update({
         "laps": laps,
-        "lap_offsets_m": list(lap_offsets),
-        "single_lap_length_m": lap_len,
+        "lap_seeds": lap_seeds,
+        "lap_lengths_m": lap_lengths,
+        "single_lap_length_m": lap_lengths[0],
         "total_length_m": total,
-        "offset_max_m": max([abs(v) for v in lap_offsets] + [info.get("offset_max_m") or 0.0]),
+        "seam_shift_max_m": max(seams) if seams else 0.0,
+        "offset_max_m": max(i.get("offset_max_m") or 0.0 for i in infos),
+        "corners_rounded": sum(int(i.get("corners_rounded") or 0) for i in infos),
+        "uturns": uturns,
         "n_points_out": len(out),
         "seam_ramp_m": ramp,
+        "lap_corner_radius_m": lap_radii,
     })
     return _to_bd(out, center, scale), info
 

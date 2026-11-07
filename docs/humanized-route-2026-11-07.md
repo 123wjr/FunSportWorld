@@ -34,7 +34,7 @@ tools/run_overlay_charts.py 与 overlay_charts_template.html（可叠加可视�
 7. uturn：大于 150° 的顶点整点替换为半径 1.2 m 的半圆；h 与 hu 的差在 12 m 内平滑过渡。
 8. wander：横向摆动 want = Σ a_j·sin(2π·w_j·s/L + φ_j)，振幅 1.20/0.80/0.50 m，波数 8/16/30（取整数才保证环首尾闭合）。
 9. relane：同向重复段（切向点积 ≥0.90 且间隔 ≥20 m）按 ±0.8 / 1.6 m 轮换分道。
-10. laps：多圈时每圈整环做**刚性平移**（seed 决定的随机方向，偏移量按等级 0/±g/±2g… 分配，g = lap_drift_m×lap_drift_min_frac，圈数多时按上限均分），圈首 30 m 内插值过渡、最后一圈末 30 m 平移回 0。不用逐点法向偏移是因为它会把 180° 掉头的两侧走廊从 4 m 压到 1.6 m，laps≥3 实测出现 176° 折角、最小半径 0.17 m；刚性平移不改变单圈形状，laps 1/2/3/4/7 × 3 个 seed 全部最大转角 ≤27.4°、>45° 0 个、最小半径 1.10~1.18 m。
+10. laps：多圈时**每圈独立重跑上面的完整链**，不是把第一圈复制/平移。第 k 圈用子种子 `_lap_seed`（k=0 用原 seed，k≥1 用 seed×7919+k×104729）重新生成摆动相位，圆角半径再乘 ±lap_corner_jitter（15%）随机抖动；第 k≥1 圈圈首 lap_ramp_m（30 m）内用 smoothstep 平滑接到上一圈末点。因此每圈的走线、圆角、摆动都不同（两圈同位置横向相差中位 1.2 m、最大 3.6 m），掉头半径与走廊宽度不受圈间拼接影响；laps=1 与 humanize_route(seed) 逐点一致。实测 laps 1/2/3 最大转角 24.96/25.27/26.85°、>45° 0 个、最小半径 1.17~1.18 m、接缝位移 0.6 m。
 
 包络：env = smoothstep(near/10 m)，near 是到最近高曲率点的弧长距离；远处 1.0（全幅摆动），近处 0.0（保护转弯）。收口用**滑动最小值（腐蚀）**而不是滑动平均——掉头弧只有 3.8 m 长，在 17 点的平均窗口里会被平均回 0.463，实测把掉头半径削到 0.52 m。包络必须乘在**合成后的总偏移**上（摆动 + 分道 + 跨圈）：只乘摆动项时掉头弧上仍叠着 0.8 m 分道偏移，半径照样被削。
 
@@ -42,7 +42,7 @@ tools/run_overlay_charts.py 与 overlay_charts_template.html（可叠加可视�
 
 ### 参数表（DEFAULTS）
 
-corner_radius_m 8.0 / corner_min_deg 5 / corner_max_deg 150 / corner_max_len_frac 0.45 / arc_sample_m 0.5 / spur_max_m 6.0 / spur_close_m 10.0 / collapse_min_seg_m 2.0 / resample_m 0.6 / lane_offset_m 2.0 / lane_taper_lo_m 2.0 / lane_taper_hi_m 6.0 / u_turn_min_deg 150 / u_turn_radius_m 1.2 / u_turn_ramp_m 12.0 / wander_amp_m (1.20, 0.80, 0.50) / wander_waves (8, 16, 30) / repeat_tol_m 1.0 / repeat_min_gap_m 20 / repeat_angle_cos 0.90 / repeat_lane_m 1.6 / lap_drift_m 1.6 / lap_drift_min_frac 0.75 / lap_drift_max_m 2.4 / lap_ramp_m 30.0 / offset_ramp_m 10.0 / offset_slope_max 0.20 / out_spacing_m 1.5 / out_keep_radius_m 20.0 / COORD_DECIMALS 7。
+corner_radius_m 8.0 / corner_min_deg 5 / corner_max_deg 150 / corner_max_len_frac 0.45 / arc_sample_m 0.5 / spur_max_m 6.0 / spur_close_m 10.0 / collapse_min_seg_m 2.0 / resample_m 0.6 / lane_offset_m 2.0 / lane_taper_lo_m 2.0 / lane_taper_hi_m 6.0 / u_turn_min_deg 150 / u_turn_radius_m 1.2 / u_turn_ramp_m 12.0 / wander_amp_m (1.20, 0.80, 0.50) / wander_waves (8, 16, 30) / repeat_tol_m 1.0 / repeat_min_gap_m 20 / repeat_angle_cos 0.90 / repeat_lane_m 1.6 / lap_corner_jitter 0.15 / lap_ramp_m 30.0 / offset_ramp_m 10.0 / offset_slope_max 0.20 / out_spacing_m 1.5 / out_keep_radius_m 20.0 / COORD_DECIMALS 7。
 
 ### 重复走廊调参证据（seed=7）
 
@@ -85,7 +85,7 @@ w = ar1_log_speed × inertia × fatigue × wave × finish × walk
 
 步频均值 167.0~167.7 spm，步长均值 0.993~0.997 m，cadence/emp 0.98~1.00，stride/emp 1.00~1.02。
 
-多圈不是同一环逐点复制：每圈整环做刚性平移，实测圈偏移 [0.0] / [0.0, 1.2] / [0.0, 1.2, −1.2] m；最后一圈末段平移回 0，避免环闭合边变成 1~2.4 m 的斜线（曾实测 155~171° 假折角）。
+多圈不是同一环逐点复制，也不是「拟人化一圈后整环平移」：每圈用独立子种子重新走完整拟人化链，摆动相位与圆角半径都重新取。seed=7 的两圈：第 2 圈到第 1 圈的最近距离中位 1.22 m、p90 2.88 m、最大 3.63 m，两圈长度 1472.31 / 1467.64 m；接缝处（圈首 30 m）平滑过渡，位移 0.60 m。三圈的各圈长 1472.31 / 1467.64 / 1471.92 m。因为每圈几何不同，生成器沿这条路径跑出来的速度也是分段独立的：artifacts 里 laps=2 的第 1/2 圈 v 均值 2.836 / 2.723，laps=3 的第 1/2/3 圈 2.930 / 2.737 / 2.693（laps=3 时末圈还含终点减速）。
 
 ### 3.4 已知限制（不靠调参掩盖）
 
@@ -162,8 +162,8 @@ w = ar1_log_speed × inertia × fatigue × wave × finish × walk
 
 ## 6. 测试与仓库卫生
 
-- 基线（ec49382 未改动）：Ran 810 / failures=2 / errors=14。本轮最终验收（含全部新增用例）：**Ran 857 / failures=3 / errors=19**。多出的 1 failure + 5 error **全部来自未跟踪的研究模块 tests/test_road_joint_lifecycle.py 的既有污染**（单跑 26/26 全过，全量序列里被 tools/road_joint_lifecycle.py 的源码指纹与导入顺序绊倒）；排除该模块后与基线逐条相同，16 条失败 ID 0 新增、0 消失。14 个基线 error 清一色是 funsport/api/flow.py 的 SimpleNamespace 缺 freeze_run_time。
-- 新增用例合计 47 条：tests/test_humanize_route.py 7（方角环圆滑、里程与闭合、偏离有界、原路往返分道与掉头弧半径、种子可复现、退化输入不崩、多圈不是同一环复制）、tests/test_route_chain_rule.py 5（走完点位里程、0 里程、返程段不计入、_as_latlon 三种入参、GCJ→BD 命中环）、tests/test_chain_core.py 11（解析、圈数换算、抬高语义、轨迹折点、链路构建、退化腿跳过）、tests/test_cli_route_chain.py 11、tests/test_gui_route_export.py 10、tests/test_route_options.py 2（固定起点成为第 0 条腿与环原点、--auto 把步频交给经验式）、tests/test_server_time_error.py 1（预览开启拟人化后环被改写且仍贴高德道路）。
+- 基线（ec49382 未改动）：Ran 810 / failures=2 / errors=14。本轮最终验收（含全部新增用例）：**Ran 858 / failures=2 / errors=14**，即 810 + 48 条新增，16 条基线失败 ID 0 新增、0 消失（日志 .test-tmp/lead/ut_perlap.log）。14 个 error 清一色是 funsport/api/flow.py 的 SimpleNamespace 缺 freeze_run_time。此前一轮曾出现 Ran 857 / failures=3 / errors=19，多出的 1 failure + 5 error 来自未跟踪的 tests/test_road_joint_lifecycle.py 在特定发现顺序下的既有污染（单跑 26/26 全过）；本轮全量没有触发。
+- 新增用例合计 48 条：tests/test_humanize_route.py 8（方角环圆滑、里程与闭合、偏离有界、原路往返分道与掉头弧半径、种子可复现、退化输入不崩、多圈逐圈重新拟人化、laps=1 与单圈入口一致）、tests/test_route_chain_rule.py 5（走完点位里程、0 里程、返程段不计入、_as_latlon 三种入参、GCJ→BD 命中环）、tests/test_chain_core.py 11（解析、圈数换算、抬高语义、轨迹折点、链路构建、退化腿跳过）、tests/test_cli_route_chain.py 11、tests/test_gui_route_export.py 10、tests/test_route_options.py 2（固定起点成为第 0 条腿与环原点、--auto 把步频交给经验式）、tests/test_server_time_error.py 1（预览开启拟人化后环被改写且仍贴高德道路）。
 - 注意：未跟踪的研究模块 tests/test_road_joint_lifecycle.py 若被全量发现，会因 tools/road_joint_lifecycle.py 的源码指纹与导入污染制造额外 1 failure + 5 error（仓库既有问题，不计入本轮，也不纳入提交）。
 - 本轮改了 3 处既有断言，都是**场景**而非阈值：
   - tests/test_route_geometry.py 的 zigzag/2/1/2001 改为 duration=640（配速 3.13 m/s）：新包络把该固定抽样的弦长从 10.205 m 降到 9.506 m，13.2 m 道路预算内已可建成；守卫不变，换到仍不可行的配速继续验证。

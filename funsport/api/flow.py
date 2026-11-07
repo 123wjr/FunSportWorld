@@ -245,10 +245,10 @@ def _build_amap_track(points, dist_m, pace_s, cadence, seed, start_ms):
     humanize_meta = {"enabled": False}
     if HUMANIZE_ROUTE:
         try:
-            # 多圈不是把同一圈重复交给生成器（那会让每圈逐点重合）：先把单圈
-            # 拟人化结果按圈拼接，每圈带独立横向漂移，再让生成器沿这条多圈
-            # 路径走到目标里程。圈数按目标里程 / 单圈长度取整，拟人化后长度
-            # 略短时补圈，避免生成器回绕到第 0 圈。
+            # 多圈不是把同一圈重复交给生成器（那会让每圈逐点重合）：每圈用
+            # 独立子种子重跑完整拟人化链（摆动/圆角都重新取），再在接缝处平滑
+            # 拼接，让生成器沿这条多圈路径走到目标里程。圈数按目标里程 / 单圈
+            # 长度取整，拟人化后长度略短时补圈，避免生成器回绕到第 0 圈。
             laps = max(1, int(math.ceil(dist_m / ring_len)))
             route_ring, hinfo = track_humanize.humanize_laps(ring, seed=seed, laps=laps)
             route_ring = list(route_ring)
@@ -263,7 +263,8 @@ def _build_amap_track(points, dist_m, pace_s, cadence, seed, start_ms):
             humanize_meta = {
                 "enabled": True,
                 "laps": laps,
-                "lap_offsets_m": [round(v, 3) for v in (hinfo.get("lap_offsets_m") or [])],
+                "lap_lengths_m": [round(v, 3) for v in (hinfo.get("lap_lengths_m") or [])],
+                "seam_shift_max_m": round(hinfo.get("seam_shift_max_m") or 0.0, 3),
                 "humanized_ring_length_m": round(human_len, 2),
                 "corners_rounded": hinfo.get("corners_rounded"),
                 "u_turns": len(hinfo.get("uturns") or ()),

@@ -83,9 +83,11 @@ def main(argv=None):
     if meta["raised_to_visit"]:
         print("⚠ 目标 %.0f m 短于走完所有点位所需的 %.0f m，按 %.0f m 生成"
               % (meta["requested_m"], meta["visit_all_points_m"], meta["target_m"]))
-    print("拟人化后 %d 圈共 %.1f m（漂移 %s m）"
+    hz_meta = meta.get("humanize") or {}
+    print("拟人化后 %d 圈共 %.1f m（各圈长 %s m，接缝 %.2f m）"
           % (result["laps"], meta["humanized_len_m"],
-             [round(x, 2) for x in (meta.get("humanize") or {}).get("lap_offsets_m", [])]))
+             [round(x, 2) for x in hz_meta.get("lap_lengths_m", [])],
+             hz_meta.get("seam_shift_max_m", 0.0)))
 
     pts = result["points"]
     s = result["stats"]
