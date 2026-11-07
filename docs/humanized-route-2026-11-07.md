@@ -102,6 +102,16 @@ w = ar1_log_speed × inertia × fatigue × wave × finish × walk
 产物：artifacts/humanized/track_laps1.json、track_laps2.json、track_laps3.json、overlay_all.json、route_overlay.html。
 
 常用参数：--laps 1,2,3 / --seed / --pace（秒每公里，默认 360）/ --cadence / --out-dir / --no-charts / --json-only。
+
+### 4.1 里程规则：不是环，是链路
+
+起点 → P1 → … → Pn → 返程回起点，一圈是一整条链路；目标里程到了就停，不补整圈、不额外闭合。环只在「点位走完了还没到目标」时用来继续跑，本身不是指标。
+
+- **起点默认固定**：tools/run_chain_route.py 的 --start 默认值就是 GCJ-02 119.547725,39.925210（用户指定点），--target 默认 2000、--pace 默认 360。高德会把起点吸附到最近可步行道路，本点实测偏移 **27 m**（吸附后 39.925029,119.547939），工具会打印这个差值。
+- **不再为凑圈多跑**：生产 funsport/api/flow.py 原先在「目标小于环长」时强行跑满一整圈 +50 m；现在先算 _visit_all_points_m（沿环走到最后一个点位所需里程），目标不足时按该里程生成并 warn，绝不为了凑整圈多跑。
+- **元数据**新增 visit_all_points_m、partial_lap_distance_m、returns_to_start，可判断这次是「走完点位」还是「提前停」、以及是否包含返程段。
+- 示例（缓存链路 2856.9 m，走完点位 1672.0 m）：--target 1500 → 实际 1672 m、终点停在最后一个点位附近（离起点 536 m）；--target 2000 → 2000 m、终点离起点 613 m。
+
 ---
 
 ## 5. 可叠加可视化
@@ -129,8 +139,11 @@ w = ar1_log_speed × inertia × fatigue × wave × finish × walk
 
 ## 6. 测试与仓库卫生
 
-- 基线（ec49382 未改动）：Ran 810 / failures=2 / errors=14。验收跑（含本轮新增用例）：**Ran 817 / failures=2 / errors=14**，与基线逐条相同，没有新增失败。2 个失败与 14 个 error 全部与本次改动无关：error 清一色是 funsport/api/flow.py:318 的 SimpleNamespace 缺 freeze_run_time。
+- 基线（ec49382 未改动）：Ran 810 / failures=2 / errors=14。验收跑（含本轮新增用例）：**Ran 822 / failures=3 / errors=19**。
+- 盘点差额：多出的 1 个 failure + 5 个 error **全部来自未跟踪的研究模块 tests/test_road_joint_lifecycle.py**（26 例）。该模块单跑 26/26 全过；放进全量序列后，它被 tools/road_joint_lifecycle.py 的 FrozenCode 源码指纹和 tests/test_road_joint_control_lifecycle.py 的模块导入污染一起绊倒，属仓库既有问题——本轮没改这两个文件，也没把它们纳入提交。
+- 排除这 26 例后：**failures=2 / errors=14，与基线逐条相同**。14 个 error 清一色是 funsport/api/flow.py 的 SimpleNamespace 缺 freeze_run_time（基线同因）。
 - 本轮新增 tests/test_humanize_route.py（6 例：方角环圆滑、里程与闭合、偏离有界、原路往返分道与掉头弧半径、种子可复现、退化输入不崩）。
+- 本轮新增 tests/test_route_chain_rule.py（5 例：走到最后一个点位的里程、无需走点位时为 0、返程段不计入、_as_latlon 支持元组/dict/glat-glon、GCJ 点位换算后能命中 BD 环）。
 - 本轮改了 3 处既有断言，都是**场景**而非阈值：
   - tests/test_route_geometry.py 的 zigzag/2/1/2001 改为 duration=640（配速 3.13 m/s）：新包络把该固定抽样的弦长从 10.205 m 降到 9.506 m，13.2 m 道路预算内已可建成；守卫不变，换到仍不可行的配速继续验证。
   - tests/test_road_joint_e0_diagnostic.py 的 fast 用例改为 dur=110（2.73 m/s），仍必须是 no_feasible_sample_in_gcj_road_budget。

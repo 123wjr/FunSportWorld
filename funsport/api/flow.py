@@ -13,7 +13,7 @@ from . import obs as api_obs
 from . import records as api_records
 from . import campus_loop as api_loop
 from ..config import load_config, load_points_cache
-from ..coordinates import coordinate_report
+from ..coordinates import checkpoint_coordinates, coordinate_report
 from ..diagnostics import analyze_run_checkpoints, format_report
 from ..completion import evaluate_completion
 from ..run_plan import RunPlan, checkpoint_distances, prepare_checkpoint_order
@@ -48,6 +48,39 @@ def _ring_length(ring):
         total += math.hypot((a[0] - b[0]) * m_lat,
                             (a[1] - b[1]) * m_lng)
     return total
+
+
+def _as_latlon(point):
+    """点位既可能是 BD 元组，也可能是接口点位 dict（lat/lon 或 glat/glon）。"""
+    if isinstance(point, dict):
+        return checkpoint_coordinates(point)[0]
+    return (point[0], point[1])
+
+
+def _visit_all_points_m(ring, points_bd):
+    """从起点沿规划路线走到最后一个点位所需的里程（不含最后一段返程）。
+
+    「依次经过各个点位」是硬约束，比「少跑一点」优先：请求里程再短，也不能
+    在走到最后一个点位之前停下。返程段（最后一个点位 -> 起点）是可选的，
+    只有走到它时目标里程还没满足才会用上。
+    """
+    if len(ring) < 2 or len(points_bd) < 2:
+        return 0.0
+    last = _as_latlon(points_bd[-1])
+    first = _as_latlon(points_bd[0])
+    if math.hypot(last[0] - first[0], last[1] - first[1]) < 1e-9:
+        return 0.0
+    lat0 = sum(p[0] for p in ring) / len(ring)
+    m_lat = meters_per_deg_lat(lat0)
+    m_lng = meters_per_deg_lng(lat0)
+    acc = 0.0
+    for i in range(1, len(ring)):
+        a, b = ring[i - 1], ring[i]
+        acc += math.hypot((a[0] - b[0]) * m_lat, (a[1] - b[1]) * m_lng)
+        if math.hypot((b[0] - last[0]) * m_lat,
+                      (b[1] - last[1]) * m_lng) <= 2.0:
+            return acc
+    return 0.0
 
 
 def _check_time_window(start_ms, dur, valid_time):
@@ -215,9 +248,11 @@ def _build_amap_track(points, dist_m, pace_s, cadence, seed, start_ms):
             route_ring = ring
     if not math.isfinite(ring_len) or ring_len <= 0:
         raise ValueError("高德规划路线为空或没有有效长度")
-    if dist_m < ring_len:
-        dist_m = ring_len + 50
-        warn("目标距离不足一圈，调整到 {:.0f}m；以预览显示为准".format(dist_m))
+    visit_len = _visit_all_points_m(ring, points)
+    if visit_len and dist_m < visit_len:
+        warn("目标距离 {:.0f}m 短于走到最后一个点位所需的 {:.0f}m，按后者生成".format(
+            dist_m, visit_len))
+        dist_m = visit_len
     duration = max(1, int(dist_m / 1000 * pace_s))
     avg = dist_m / duration
     fixed_avg = min(max(avg, SPEED_FLOOR + 0.1), SPEED_CEIL - 0.1)
@@ -227,9 +262,15 @@ def _build_amap_track(points, dist_m, pace_s, cadence, seed, start_ms):
         raise ValueError("沿高德路线生成后的时长超过 24 小时，停止生成")
     track = generator.build(dist_m, duration, seed, start_ms, route_ring,
                             ordered_path=True, cadence_target=cadence)
+    complete_laps = int((track["totalDistance"] + 0.01) // ring_len)
     return track, {"provider": "amap_walking", "vertex_count": len(ring),
                    "ring_length_m": round(ring_len, 2),
-                   "complete_laps": int((track["totalDistance"] + 0.01) // ring_len),
+                   "complete_laps": complete_laps,
+                   # 里程到目标即停，不为凑整圈补距离：这告诉调用方轨迹是否走完整条链路。
+                   "visit_all_points_m": round(visit_len, 2),
+                   "partial_lap_distance_m": round(
+                       track["totalDistance"] - complete_laps * ring_len, 2),
+                   "returns_to_start": complete_laps >= 1,
                    "humanize": humanize_meta, **selection}
 
 

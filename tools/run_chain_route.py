@@ -6,6 +6,7 @@
   2. 走完点位若还没到目标里程，就**往回生成到出发点**（Pn -> 起点 的返程腿）；
   3. 还不够，就**再按点位顺序跑一遍**（多圈，每圈带一点横向漂移，免得逐点重合）；
   4. 一到目标里程立即停止，不补完整圈、不额外闭合。
+  5. 反方向也成立：目标里程短于「走完所有点位」所需里程时，按后者生成（先把点位跑完），绝不为了凑数砍点位。
 
 所以环只是「跑完点位后的返程 + 重复」的副产品，不是指标。
 
@@ -78,7 +79,8 @@ def fetch_chain(start_gcj, points_gcj, key):
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description="起点 -> 点位顺序 -> 返程 -> 重复，满目标里程就地停止")
-    ap.add_argument("--start", default="119.547725,39.925210", help="GCJ-02 lng,lat")
+    ap.add_argument("--start", default="119.547725,39.925210",
+                   help="GCJ-02 lng,lat；默认即用户指定起点")
     ap.add_argument("--point", action="append", default=[], help="点位 GCJ-02 lng,lat，可重复")
     ap.add_argument("--target", type=float, default=2000.0, help="目标里程（米），达到即停")
     ap.add_argument("--pace", type=float, default=360.0, help="秒/公里")
@@ -94,6 +96,8 @@ def main(argv=None):
 
     start = parse_lnglat(args.start)
     points = [parse_lnglat(p) for p in args.point]
+    if not points:
+        raise SystemExit("至少需要一个 --point：规则是「依次经过各个点位」，没有点位就没有链路")
 
     if args.chain_cache:
         cached = json.loads(Path(args.chain_cache).read_text(encoding="utf-8"))
@@ -110,8 +114,15 @@ def main(argv=None):
                 {"road_bd": road_bd, "leg_dists": leg_dists}, ensure_ascii=False), encoding="utf-8")
 
     lap_len = rhl.ring_length(road_bd)
-    laps = max(1, int(math.ceil(args.target / max(lap_len, 1e-6))))
-    print("链路（起点->点位->返程）%.1f m；目标 %.0f m 需要 %d 圈" % (lap_len, args.target, laps))
+    # 「依次经过各个点位」优先于「少跑一点」：跑到最后一个点位的里程是下界。
+    visit_len = sum(leg_dists[:-1]) if len(leg_dists) > 1 else 0.0
+    target = float(args.target)
+    if visit_len and target < visit_len:
+        print("⚠ 目标 %.0f m 短于走完所有点位所需的 %.0f m，按 %.0f m 生成" % (target, visit_len, visit_len))
+        target = visit_len
+    laps = max(1, int(math.ceil(target / max(lap_len, 1e-6))))
+    print("链路（起点->点位->返程）%.1f m，走完点位 %.1f m；目标 %.0f m 需要 %d 圈"
+          % (lap_len, visit_len, target, laps))
 
     route_bd, info = hz.humanize_laps(road_bd, seed=args.seed, laps=laps)
     route_bd = list(route_bd)
@@ -121,8 +132,8 @@ def main(argv=None):
     print("拟人化后 %d 圈共 %.1f m（漂移 %s m）" % (info["laps"],
           human_len, [round(x, 2) for x in info.get("lap_offsets_m", [])]))
 
-    dur = args.target / 1000.0 * args.pace
-    track = gen.build(args.target, round(dur), args.seed, args.start_ms, route_bd,
+    dur = target / 1000.0 * args.pace
+    track = gen.build(target, round(dur), args.seed, args.start_ms, route_bd,
                       ordered_path=True, cadence_target=0, sample_period_s=2,
                       distance_mode="arc")
     pts, total = rhl.track_to_points(track, route_bd)
@@ -147,10 +158,11 @@ def main(argv=None):
         p["lat"], p["lng"] = round(g[0], 7), round(g[1], 7)
     road_gcj = [bd09_to_gcj02(lat, lng) for lat, lng in road_bd]
     route_gcj = [bd09_to_gcj02(lat, lng) for lat, lng in route_bd]
-    doc = rhl.overlay_doc("%.2f km" % (args.target / 1000.0), pts, road_gcj, route_gcj,
-                          laps, human_len, args.target, dur, args.seed, 0,
-                          {"target_dist_m": args.target, "laps_needed": laps,
+    doc = rhl.overlay_doc("%.2f km" % (target / 1000.0), pts, road_gcj, route_gcj,
+                          laps, human_len, target, dur, args.seed, 0,
+                          {"target_dist_m": target, "laps_needed": laps,
                            "chain_len_m": round(lap_len, 1),
+                           "visit_all_points_m": round(visit_len, 1) if visit_len else "",
                            "start_gcj": "%.6f,%.6f" % start})
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
