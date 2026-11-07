@@ -4,7 +4,9 @@ import queue
 import threading
 import time
 import tkinter as tk
+import webbrowser
 from datetime import datetime, timedelta
+from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 from tkinter.scrolledtext import ScrolledText
 
@@ -266,12 +268,19 @@ class App:
         self.add_tooltip(outside_check, "仅跳过本地检查，服务器仍可能返回 11016")
         actions = ttk.Frame(form)
         actions.grid(row=11, column=0, columnspan=2, sticky="ew", pady=(4, 0))
-        self.button(actions, "在线预览", self.generate_preview, True).pack(side="left", expand=True, fill="x")
-        route_preview = self.button(actions, "轨迹预览", self.generate_route_preview)
+        buttons_row = ttk.Frame(actions)
+        buttons_row.pack(fill="x")
+        self.button(buttons_row, "在线预览", self.generate_preview, True).pack(
+            side="left", expand=True, fill="x")
+        route_preview = self.button(buttons_row, "轨迹预览", self.generate_route_preview)
         route_preview.pack(side="left", expand=True, fill="x", padx=(6, 0))
         self.add_tooltip(route_preview, "使用缓存点位和高德路线；不访问运动服务，不可提交")
-        self.submit_button = self.button(actions, "提交此方案", self.submit_run)
+        self.submit_button = self.button(buttons_row, "提交此方案", self.submit_run)
         self.submit_button.pack(side="left", expand=True, fill="x", padx=(6, 0))
+        self.export_button = self.button(actions, "导出交互路线图", self.export_route_overlay)
+        self.export_button.pack(fill="x", pady=(6, 0))
+        self.add_tooltip(self.export_button,
+                         "从当前方案轨迹生成本地离线交互图；不联网、不提交")
         self.freeze_status = tk.StringVar(value="尚未获取在线策略，封禁状态未知")
         self.freeze_status_label = ttk.Label(
             form, textvariable=self.freeze_status, wraplength=305, style="Muted.TLabel")
@@ -279,6 +288,9 @@ class App:
         self.plan_status = tk.StringVar(value="尚未生成方案")
         ttk.Label(form, textvariable=self.plan_status, wraplength=305).grid(
             row=13, column=0, columnspan=2, sticky="w", pady=4)
+        self.chain_status = tk.StringVar(value="链路：尚未生成方案")
+        ttk.Label(form, textvariable=self.chain_status, wraplength=305,
+                  style="Muted.TLabel").grid(row=14, column=0, columnspan=2, sticky="w")
 
         self.preview_tabs = ttk.Notebook(self.run_page)
         self.preview_tabs.grid(row=0, column=1, sticky="nsew")
@@ -758,6 +770,7 @@ class App:
             var.set(str(len(self.points)) if key == "points" and self.points else "--")
         if had_plan:
             self.plan_status.set("参数已变化，请重新生成方案")
+            self.chain_status.set("链路：尚未生成方案")
             self.set_text(self.plan_text, "方案已失效")
             self.draw_points()
         self.refresh_submit_state()
@@ -768,6 +781,21 @@ class App:
                  and not self.freeze_refresh_required
                  and self._remaining_freeze_seconds(self.plan.data()) <= 0)
         self.submit_button.configure(state="normal" if ready else "disabled")
+        self.export_button.configure(
+            state="normal" if self.plan is not None and not self.busy else "disabled")
+
+    @staticmethod
+    def chain_text(route):
+        """把方案 route 里的链路字段整理成一行诊断；旧方案没有这些字段。"""
+        try:
+            visit = float(route["visit_all_points_m"])
+            laps = int(route["complete_laps"])
+            partial = float(route["partial_lap_distance_m"])
+        except (KeyError, TypeError, ValueError):
+            return "链路：未提供（旧方案）"
+        return "链路：走完点位 {:.0f} m · 已走 {} 圈 · 尾部 {:.0f} m · {}".format(
+            visit, laps, partial,
+            "已走返程" if route.get("returns_to_start") else "未走返程")
 
     @staticmethod
     def _remaining_freeze_seconds(data):
@@ -898,10 +926,35 @@ class App:
                         "有效时段内" if data["window_ok"] else "有效时段外")
         self.plan_status.set("方案 {}\n{:.0f} m / {} s / {}".format(plan.plan_id, data["track"]["totalDistance"],
             data["track"]["totalTime"], window_label))
+        self.chain_status.set(self.chain_text(data.get("route")))
         self.update_freeze_status()
         self.preview_tabs.select(0)
         self.fit_map()
         self.refresh_submit_state()
+
+    def export_route_overlay(self):
+        """导出当前方案的可交互路线图；只读冻结轨迹，不联网、不提交。"""
+        if self.plan is None:
+            self.show_error("请先生成方案预览，再导出交互路线图")
+            return
+        plan = self.plan
+        track = plan.data()["track"]
+        self.start_job("导出交互路线图",
+                       lambda: services.export_route_overlay(track, plan.plan_id),
+                       self.export_route_overlay_done)
+
+    def export_route_overlay_done(self, result):
+        json_path, html_path = result
+        target = html_path or json_path
+        self.status.set("交互路线图：{}".format(target))
+        if html_path:
+            self.append_log("已导出交互路线图：{}（数据：{}）".format(html_path, json_path))
+            try:
+                webbrowser.open(Path(html_path).resolve().as_uri())
+            except (OSError, ValueError) as exc:
+                self.show_error("交互路线图已生成，但无法交给浏览器：{}".format(exc))
+        else:
+            self.append_log("已导出交互路线图数据：{}".format(json_path))
 
     def submit_run(self):
         from .api.flow import submit_run_plan

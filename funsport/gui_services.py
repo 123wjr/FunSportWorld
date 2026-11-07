@@ -3,6 +3,7 @@ import json
 import math
 import re
 from datetime import datetime
+from pathlib import Path
 
 from . import config
 from .diagnostics import analyze_checkpoints
@@ -186,6 +187,26 @@ def fetch_record_report(rrid):
     """查询指定记录并只返回诊断统计，不把原始响应交给界面。"""
     from .api.records import fetch_one_record
     return with_client(lambda client: analyze_checkpoints(fetch_one_record(client, rrid)))
+
+
+def export_route_overlay(track, plan_id, out_dir=None, want_html=True):
+    """把已生成的轨迹导出成可交互路线图；不联网、不重新规划路线。
+
+    默认写到仓库的 artifacts/humanized/gui_<plan_id>.json 与 .html，HTML 由
+    tools/run_overlay_charts.py 子进程生成。轨迹里没有路线折线，overlay 文档
+    的 route 为空，图表用 points 兜底。
+    """
+    if not isinstance(track, dict) or len(track.get("locations") or ()) < 2:
+        raise ValueError("没有可导出的轨迹，请先生成方案预览")
+    from .api import chain
+    doc = chain.overlay_document_from_track(track, name=str(plan_id))
+    root = Path(__file__).resolve().parents[1]
+    target = Path(out_dir) if out_dir is not None else (root / "artifacts" / "humanized")
+    stem = "gui_" + re.sub(r"[^0-9A-Za-z_.-]", "_", str(plan_id))
+    json_path = target / (stem + ".json")
+    html_path = target / (stem + ".html") if want_html else None
+    return chain.write_document(doc, json_path, html_path,
+                                title="方案 {} 轨迹".format(plan_id))
 
 
 def safe_text(text, secrets=()):

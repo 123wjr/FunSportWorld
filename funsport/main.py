@@ -100,6 +100,30 @@ def main(argv=None):
                     help="兼容参数；生成轨迹始终使用高德步行 API")
     sp.set_defaults(func=cmds.cmd_run)
 
+    # ── route ───────────────────────────────────────────────
+    sp = sub.add_parser("route", help="起点 -> 点位顺序 -> 返程 -> 重复，满目标里程就地停止")
+    sp.add_argument("--start", help="起点 GCJ-02 lng,lat（缺省=第一个点位）")
+    sp.add_argument("--point", action="append",
+                    help="点位 GCJ-02 lng,lat（可重复；顺序即点位顺序，给了就不读缓存）")
+    sp.add_argument("--dist", type=float, default=0,
+                    help="目标距离（<100 按 km，>=100 按米）")
+    sp.add_argument("--target", type=float,
+                    help="目标里程（米，优先级高于 --dist）")
+    sp.add_argument("--pace", type=float, default=360,
+                    help="配速（秒/公里，160~520，默认 360）")
+    sp.add_argument("--cadence", type=float, default=0,
+                    help="目标步频（默认 0=按经验式）")
+    sp.add_argument("--seed", type=int, default=7)
+    sp.add_argument("--start-ms", type=int, default=0,
+                    help="开始时间毫秒时间戳（默认 0=当前时间）")
+    sp.add_argument("--json", default=cmds.DEFAULT_ROUTE_JSON,
+                    help="overlay JSON 输出路径")
+    sp.add_argument("--html", default=cmds.DEFAULT_ROUTE_HTML,
+                    help="交互 HTML 输出路径")
+    sp.add_argument("--no-html", action="store_true", help="只写 JSON，不生成 HTML")
+    sp.add_argument("--title", help="图表标题")
+    sp.set_defaults(func=cmds.cmd_route)
+
     # ── AI ──────────────────────────────────────────────────
     sp = sub.add_parser("ai-list", help="AI 项目列表")
     sp.set_defaults(func=cmds.cmd_ai_list)
@@ -146,7 +170,9 @@ def main(argv=None):
         if not args.cmd:
             cmd_gui()
         else:
-            args.func(args)
+            code = args.func(args)
+            if isinstance(code, int):
+                sys.exit(code)
     except KeyboardInterrupt:
         err("用户中断")
     except Exception as e:

@@ -2,6 +2,7 @@
 import argparse
 import json
 import random
+import subprocess
 import sys
 import time
 from datetime import datetime, timedelta
@@ -181,6 +182,101 @@ def cmd_run(args):
        f"平均步频 {result['cadence_avg']:.0f}spm")
     info(f"OBS {result['obs_ok']}/2 · 详情读取 {'成功' if result['detail_ok'] else '失败'}")
     info("打卡点是否显示仍需以官方 App 为准，详情读取成功不代表打卡验证通过")
+
+
+# ── route ───────────────────────────────────────────────────
+DEFAULT_ROUTE_JSON = "artifacts/humanized/cli_route.json"
+DEFAULT_ROUTE_HTML = "artifacts/humanized/cli_route.html"
+DEFAULT_TARGET_M = 2000.0
+
+
+def _route_target_m(args):
+    """--target（米）优先；否则 --dist 按 run 的口径换算：<100 当 km，>=100 当米。"""
+    target = getattr(args, "target", None)
+    if target is not None and float(target) > 0:
+        return float(target)
+    dist = float(getattr(args, "dist", 0) or 0)
+    if dist > 0:
+        return dist * 1000.0 if dist < 100 else dist
+    return DEFAULT_TARGET_M
+
+
+def _fmt_num(value, digits=3):
+    """统计量样本不足时是 None，打印占位符而不是在格式化时抛异常。"""
+    return "-" if value is None else f"{float(value):.{digits}f}"
+
+
+def cmd_route(args):
+    """按链路规则生成轨迹并写出 overlay，仅本地生成，不提交、不访问运动接口。"""
+    from ..api import chain
+
+    try:
+        pace = float(getattr(args, "pace", 0) or 0)
+        if pace < 160 or pace > 520:
+            print(f"错误：配速需在 160~520 秒每公里之间（当前 {pace:.0f}）")
+            return 1
+        point_texts = list(getattr(args, "point", None) or [])
+        if point_texts:
+            points = [chain.parse_lnglat(text) for text in point_texts]
+        else:
+            points = chain.points_from_cache_gcj()
+        start_text = getattr(args, "start", None)
+        start = chain.parse_lnglat(start_text) if start_text else points[0]
+        target_m = _route_target_m(args)
+        cadence = float(getattr(args, "cadence", 0) or 0)
+        seed = int(getattr(args, "seed", 7))
+        start_ms = int(getattr(args, "start_ms", 0) or 0)
+
+        print(f"起点 GCJ {start[0]:.6f},{start[1]:.6f}，点位 {len(points)} 个，"
+              f"目标 {target_m:.0f} m，配速 {pace:.0f} s/km")
+        result = chain.build_chain_route(
+            start, points, target_m=target_m, pace_s=pace, cadence=cadence,
+            seed=seed, start_ms=start_ms, progress=print)
+    except (ValueError, RuntimeError, OSError, subprocess.SubprocessError) as exc:
+        print(f"错误：{exc}")
+        return 1
+
+    meta = result.get("chain") or {}
+    stats = result.get("stats") or {}
+    requested = float(meta.get("requested_m") or target_m)
+    target = float(meta.get("target_m") or target_m)
+    raised = bool(meta.get("raised_to_visit"))
+    laps = meta.get("laps") or result.get("laps") or 0
+
+    print(f"链路长度（起点 -> 点位 -> 返程）：{float(meta.get('lap_len_m') or 0.0):.1f} m")
+    print(f"走完点位里程：{float(meta.get('visit_all_points_m') or 0.0):.1f} m")
+    if raised:
+        visit = float(meta.get("visit_all_points_m") or target)
+        print(f"目标 {requested:.0f} m 短于走完所有点位所需的 {visit:.0f} m，按 {visit:.0f} m 生成")
+    else:
+        print(f"目标里程：{target:.0f} m")
+    print(f"规划圈数（链路重复遍数）：{laps}")
+    print(f"实际里程 {float(result.get('dist_m') or 0.0):.1f} m / "
+          f"时长 {float(result.get('dur_s') or 0.0):.0f} s / "
+          f"点数 {len(result.get('points') or ())}")
+    print(f"终点离起点距离：{float(meta.get('end_offset_m') or 0.0):.1f} m")
+    print(f"速度均值 {_fmt_num(stats.get('v_mean'), 2)} m/s，"
+          f"cv {_fmt_num(stats.get('v_cv'), 3)}")
+    print(f"步频 {_fmt_num(stats.get('cadence_mean'), 1)} spm，"
+          f"步长 {_fmt_num(stats.get('stride_mean'), 3)} m")
+    print(f"最长低速连段 {stats.get('max_low_speed_run', '-')} 点，"
+          f"步频弹性 {_fmt_num(stats.get('cadence_elasticity'), 3)}")
+
+    json_path = getattr(args, "json", "") or DEFAULT_ROUTE_JSON
+    html_path = None
+    if not getattr(args, "no_html", False):
+        html_path = getattr(args, "html", "") or DEFAULT_ROUTE_HTML
+    title = getattr(args, "title", None) or None
+    try:
+        out_json, out_html = chain.write_overlay(result, json_path, html_path,
+                                                 title=title, progress=print)
+    except (ValueError, RuntimeError, OSError, subprocess.SubprocessError) as exc:
+        print(f"错误：{exc}")
+        return 1
+    print(f"JSON：{out_json}")
+    if out_html:
+        print(f"HTML：{out_html}")
+    return 0
 
 
 # ── AI ──────────────────────────────────────────────────────

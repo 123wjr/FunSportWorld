@@ -112,6 +112,24 @@ w = ar1_log_speed × inertia × fatigue × wave × finish × walk
 - **元数据**新增 visit_all_points_m、partial_lap_distance_m、returns_to_start，可判断这次是「走完点位」还是「提前停」、以及是否包含返程段。
 - 示例（缓存链路 2856.9 m，走完点位 1672.0 m）：--target 1500 → 实际 1672 m、终点停在最后一个点位附近（离起点 536 m）；--target 2000 → 2000 m、终点离起点 613 m。
 
+### 4.2 命令行：route 子命令
+
+    .venv\Scripts\python.exe -B -m funsport.main route --start 119.547725,39.925210 \
+        --point 119.551768,39.924663 --point 119.550203,39.929288 \
+        --target 2000 --pace 360
+
+- 只本地生成轨迹与 HTML，**不提交、不访问运动接口**；与 run 一样是独立子命令。
+- 点位来源：给了 --point 就按给定顺序（不读缓存）；没给就读点位缓存（chain.points_from_cache_gcj）。起点缺省 = 第一个点位；两者重合时**跳过这条 0 m 的退化腿**，不向高德发 origin==destination 请求（leg_dists 仍按 0 m 计入，走完点位里程不受影响）。
+- 目标口径与 run 一致：--target 单位米、优先级最高；--dist <100 按 km、>=100 按米；都没有则 2000 m。
+- 打印：链路长度（起点→点位→返程）、走完点位里程、是否因目标过短而升档、圈数、实际里程/时长/点数、终点离起点距离、速度均值与 cv、步频/步长、最长低速连段、步频弹性、JSON/HTML 路径。
+- 参数错误、生成失败、写盘失败都返回退出码 1 并打印一行错误，不抛 traceback。
+
+### 4.3 图形界面
+
+- 方案面板底部新增**链路诊断行**：读方案 route 元数据的 visit_all_points_m / complete_laps / partial_lap_distance_m / returns_to_start，显示「链路：走完点位 1672 m · 已走 1 圈 · 尾部 328 m · 已走返程」；旧方案没有这些字段时显示「未提供（旧方案）」，参数一改就回到「尚未生成方案」。
+- 新增**「导出交互路线图」按钮**：只在有方案且不忙时可用；后台调用 gui_services.export_route_overlay，默认写 artifacts/humanized/gui_<plan_id>.json / .html，完成后状态栏与日志给出路径并交给系统浏览器打开。导出只读已生成轨迹，**不联网、不重新规划、不提交**。
+- 已知限制：方案快照不含路线折线，导出的 overlay 文档 route 为空，图里只有轨迹点、没有高德参考折线；需要参考折线时用 4.1 / 4.2 的入口（它们带链路折线）。
+
 ---
 
 ## 5. 可叠加可视化
@@ -139,14 +157,12 @@ w = ar1_log_speed × inertia × fatigue × wave × finish × walk
 
 ## 6. 测试与仓库卫生
 
-- 基线（ec49382 未改动）：Ran 810 / failures=2 / errors=14。验收跑（含本轮新增用例）：**Ran 822 / failures=3 / errors=19**。
-- 盘点差额：多出的 1 个 failure + 5 个 error **全部来自未跟踪的研究模块 tests/test_road_joint_lifecycle.py**（26 例）。该模块单跑 26/26 全过；放进全量序列后，它被 tools/road_joint_lifecycle.py 的 FrozenCode 源码指纹和 tests/test_road_joint_control_lifecycle.py 的模块导入污染一起绊倒，属仓库既有问题——本轮没改这两个文件，也没把它们纳入提交。
-- 排除这 26 例后：**failures=2 / errors=14，与基线逐条相同**。14 个 error 清一色是 funsport/api/flow.py 的 SimpleNamespace 缺 freeze_run_time（基线同因）。
-- 本轮新增 tests/test_humanize_route.py（6 例：方角环圆滑、里程与闭合、偏离有界、原路往返分道与掉头弧半径、种子可复现、退化输入不崩）。
-- 本轮新增 tests/test_route_chain_rule.py（5 例：走到最后一个点位的里程、无需走点位时为 0、返程段不计入、_as_latlon 支持元组/dict/glat-glon、GCJ 点位换算后能命中 BD 环）。
+- 基线（ec49382 未改动）：Ran 810 / failures=2 / errors=14。本轮最终验收（含全部新增用例）：**Ran 854 / failures=2 / errors=14**——16 条失败 ID 与基线逐条相同（0 新增、0 消失）。14 个 error 清一色是 funsport/api/flow.py 的 SimpleNamespace 缺 freeze_run_time（基线同因）。
+- 新增用例合计 43 条：tests/test_humanize_route.py 6（方角环圆滑、里程与闭合、偏离有界、原路往返分道与掉头弧半径、种子可复现、退化输入不崩）、tests/test_route_chain_rule.py 5（走完点位里程、0 里程、返程段不计入、_as_latlon 三种入参、GCJ→BD 命中环）、tests/test_chain_core.py 11（解析、圈数换算、抬高语义、轨迹折点、链路构建、退化腿跳过）、tests/test_cli_route_chain.py 11、tests/test_gui_route_export.py 10。
+- 注意：未跟踪的研究模块 tests/test_road_joint_lifecycle.py 若被全量发现，会因 tools/road_joint_lifecycle.py 的源码指纹与导入污染制造额外 1 failure + 5 error（仓库既有问题，不计入本轮，也不纳入提交）。
 - 本轮改了 3 处既有断言，都是**场景**而非阈值：
   - tests/test_route_geometry.py 的 zigzag/2/1/2001 改为 duration=640（配速 3.13 m/s）：新包络把该固定抽样的弦长从 10.205 m 降到 9.506 m，13.2 m 道路预算内已可建成；守卫不变，换到仍不可行的配速继续验证。
   - tests/test_road_joint_e0_diagnostic.py 的 fast 用例改为 dur=110（2.73 m/s），仍必须是 no_feasible_sample_in_gcj_road_budget。
   - tests/test_server_time_error.py 的预览断言：一个用例显式关掉 HUMANIZE_ROUTE 继续断言「传给生成器的是高德折线」，另新增一个用例断言拟人化开启后环被改写、首尾闭合、且每个顶点离高德道路不超过 25 m。
-- 仓库卫生：artifacts/、.test-tmp/、data/keep/ 已加入 .gitignore（生成产物可复跑；data/keep 是真实用户导出，属私密数据）。
+- 仓库卫生：artifacts/、.test-tmp/、data/ 整个目录已加入 .gitignore（生成产物可复跑；data/ 下是真实用户导出与本地轨迹，含 .gpx/.kml/.tcx，属私密数据）。
 - 未提交：本分支的改动由 lead 统一提交；队友与 lead 的中间报告（docs/.status-*.md、.motion-report.md、.charts-report.md、.verify-humanized.md）是工作笔记，保持未跟踪。

@@ -194,8 +194,10 @@ class GuiTests(IsolatedCase):
         self.assertTrue(all(button.instate(["disabled"]) for button in self.app.buttons))
         release.set()
         self.pump()
-        self.assertTrue(all(not button.instate(["disabled"]) for button in self.app.buttons if button is not self.app.submit_button))
+        self.assertTrue(all(not button.instate(["disabled"]) for button in self.app.buttons
+                            if button not in (self.app.submit_button, self.app.export_button)))
         self.assertTrue(self.app.submit_button.instate(["disabled"]))
+        self.assertTrue(self.app.export_button.instate(["disabled"]))
 
     def test_generate_does_not_submit(self):
         """生成预览只执行准备阶段，提交按钮随后才启用。"""
