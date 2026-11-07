@@ -99,6 +99,10 @@ class LocalPreviewTests(IsolatedCase):
                                                (flow.api_obs, "upload_both_keys"))]
             stack.enter_context(patch.object(flow.log, "disabled", True))
             amap = stack.enter_context(patch.object(flow.api_loop, "get_campus_loop", return_value=(sample_ring(), {})))
+            # 本用例校验的是"生成器拿到的是高德选路结果"，因此关掉拟人化，
+            # 让传给 build 的点列仍逐顶点等于高德折线；拟人化本身由
+            # test_route_preview_humanizes_ring_but_stays_on_road 单独覆盖。
+            stack.enter_context(patch.object(flow, "HUMANIZE_ROUTE", False))
             build = stack.enter_context(patch.object(flow.generator, "build", wraps=flow.generator.build))
             plan = flow.prepare_route_preview(fake_client(), 1.6, 400, 160, before=60, seed=42)
             for boundary in boundaries:
@@ -110,6 +114,36 @@ class LocalPreviewTests(IsolatedCase):
         self.assertIsNone(plan.data()["policy"])
         self.assertIn("不可提交", format_plan(plan))
         self.assertIn("缓存点位时间", format_plan(plan))
+
+    def test_route_preview_humanizes_ring_but_stays_on_road(self):
+        """拟人化开启时传给生成器的是圆滑/靠右偏移后的同一环，仍贴着高德道路。"""
+        import math
+        from funsport.coordinates import distance_m
+
+        self.cache_points()
+        road = sample_ring()
+        with patch.object(flow.log, "disabled", True), \
+                patch.object(flow.api_loop, "get_campus_loop", return_value=(road, {})), \
+                patch.object(flow.generator, "build", wraps=flow.generator.build) as build:
+            flow.prepare_route_preview(fake_client(), 1.6, 400, 160, before=60, seed=42)
+
+        passed = build.call_args.args[4]
+        self.assertNotEqual(passed, road, "拟人化没有生效，生成器仍拿到逐顶点照抄的高德折线")
+        self.assertGreater(len(passed), len(road))
+        self.assertEqual(passed[0], passed[-1], "补闭合点后首尾必须重合")
+
+        # 每个顶点到高德折线各段的最近距离，最大值代表漂移上界。
+        def seg_dist(p, a, b):
+            lat0 = math.radians(a[0])
+            ax, ay = (b[1] - a[1]) * 111320.0 * math.cos(lat0), (b[0] - a[0]) * 110540.0
+            px, py = (p[1] - a[1]) * 111320.0 * math.cos(lat0), (p[0] - a[0]) * 110540.0
+            denom = ax * ax + ay * ay
+            t = 0.0 if denom == 0 else max(0.0, min(1.0, (px * ax + py * ay) / denom))
+            return math.hypot(px - t * ax, py - t * ay)
+
+        segs = list(zip(road, road[1:]))
+        worst = max(min(seg_dist(p, a, b) for a, b in segs) for p in passed)
+        self.assertLess(worst, 25.0, "拟人化把轨迹甩离高德道路太远：{:.1f} m".format(worst))
 
     def test_local_preview_cannot_submit_even_with_override(self):
         """即使调用后端并显式跳过时间检查，本地测试轨迹也不能提交。"""

@@ -17,11 +17,17 @@ from ..coordinates import coordinate_report
 from ..diagnostics import analyze_run_checkpoints, format_report
 from ..completion import evaluate_completion
 from ..run_plan import RunPlan, checkpoint_distances, prepare_checkpoint_order
-from ..track import generator, wire
+from ..track import generator, humanize as track_humanize, wire
 from ..track.checkpoints import evaluate_checkpoints
 from ..track.geom import (SPEED_FLOOR, SPEED_CEIL, meters_per_deg_lat,
                           meters_per_deg_lng)
 from ..logger import log, ok, warn, step, err
+
+# 拟人化开关：True 时选路结果先过 funsport/track/humanize.py 再进生成器。
+# 实测（环 1478.9 m，seed=7）：转角 >45° 计数 12 → 0，最大单点转角 173.7° → 25.0°，
+# 最小曲率半径 0.60 → 1.18 m，重复走廊长度 298 → 0~61 m，偏离高德折线 p95 3.9 m，
+# 里程变化 <0.5%。关掉它可以回到「逐顶点照抄高德折线」的旧行为。
+HUMANIZE_ROUTE = True
 
 
 def _ring_length(ring):
@@ -178,9 +184,35 @@ def _resolve_start_ms(before, start_ms):
 
 
 def _build_amap_track(points, dist_m, pace_s, cadence, seed, start_ms):
-    """同一种子选择高德候选道路并生成轨迹，失败时不使用拟合环替代。"""
+    """同一种子选择高德候选道路并生成轨迹，失败时不使用拟合环替代。
+
+    拟人化（HUMANIZE_ROUTE）：选路结果先过 funsport/track/humanize.py ——
+    转角按精确圆弧圆滑、直线叠加低频横向摆动、全程靠右行驶（掉头两腿因此分开）、
+    同向重复段分道、掉头换成真实半径的 U 型弧。它只改几何不改里程（长度变化
+    <0.5%），对外报告的 ring_length_m 仍按高德原折线算，口径不变；任何异常都
+    退回原始折线，不让拟人化成为生成失败的新来源。
+    """
     ring, selection = api_loop.get_campus_loop(points, route_seed=seed, with_metadata=True)
     ring_len = _ring_length(ring)
+    route_ring = ring
+    humanize_meta = {"enabled": False}
+    if HUMANIZE_ROUTE:
+        try:
+            route_ring, hinfo = track_humanize.humanize_route(ring, seed=seed)
+            route_ring = list(route_ring)
+            if len(route_ring) > 1 and route_ring[0] != route_ring[-1]:
+                route_ring.append(route_ring[0])   # 补齐闭合点：_ring_length 只累加相邻段
+            humanize_meta = {
+                "enabled": True,
+                "humanized_ring_length_m": round(_ring_length(route_ring), 2),
+                "corners_rounded": hinfo.get("corners_rounded"),
+                "u_turns": len(hinfo.get("uturns") or ()),
+                "offset_max_m": round(hinfo.get("offset_max_m") or 0.0, 3),
+                "vertices": len(route_ring),
+            }
+        except Exception as exc:                                # pragma: no cover - 兜底
+            warn("[humanize] 拟人化失败，退回原始高德折线：{!r}".format(exc))
+            route_ring = ring
     if not math.isfinite(ring_len) or ring_len <= 0:
         raise ValueError("高德规划路线为空或没有有效长度")
     if dist_m < ring_len:
@@ -193,11 +225,12 @@ def _build_amap_track(points, dist_m, pace_s, cadence, seed, start_ms):
         duration = max(1, int(round(dist_m / fixed_avg)))
     if duration > 86400:
         raise ValueError("沿高德路线生成后的时长超过 24 小时，停止生成")
-    track = generator.build(dist_m, duration, seed, start_ms, ring,
+    track = generator.build(dist_m, duration, seed, start_ms, route_ring,
                             ordered_path=True, cadence_target=cadence)
     return track, {"provider": "amap_walking", "vertex_count": len(ring),
                    "ring_length_m": round(ring_len, 2),
-                   "complete_laps": int((track["totalDistance"] + 0.01) // ring_len), **selection}
+                   "complete_laps": int((track["totalDistance"] + 0.01) // ring_len),
+                   "humanize": humanize_meta, **selection}
 
 
 def prepare_run_plan(client, *args, diagnostic_capture=False, **kwargs):

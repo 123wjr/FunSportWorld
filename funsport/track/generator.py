@@ -39,27 +39,48 @@ def fit_speeds(w, dts, target, floor=None, ceil=None):
 
 
 def _fit_cadence(base, dts, target):
-    """将逐段步频限定在 60–220 spm，同时匹配指定的时间加权均值。"""
+    """限定 60–220 spm，并按目标均值施加**对数域整体偏移**。
+
+    target=0（默认）不做任何均值拟合：把时间加权均值强行拉回某个数会把
+    幂律步频拉平，正是旧实现 corr(瞬时速度, 步频) 只有 ~0.23 的主因之一。
+
+    target>0 时只施加一个指数偏移 exp(s)（等价于把整条幂律曲线在 log 域平移，
+    即把参考步频 cad_ref 搬到 cad_ref·exp(s)）：单调、保序，
+    dln(cad)/dln(v) 恒等于 realism.CADENCE_POWER_EXP 不被缩放破坏。
+
+    旧实现在**夹紧之后**做标量缩放，且自己的下限写死 60：模型里 120spm 的
+    慢行地板被乘成 90spm 后仍落在 60–220 内合法存活，于是出现「经验式地板被
+    悄悄下移」的边界伪影。现在地板随偏移一起搬动
+    （realism.CADENCE_FLOOR_SPM·exp(s)，并夹回 [60,220]）：偏移≈0 时模型地板
+    原样保留，只有用户明确要求整体慢步频时地板才跟着下移。
+    """
     if target == 0:
         return [realism.clip(c, 60.0, 220.0) for c in base]
     if target in (60, 220):
         return [float(target)] * len(base)
     duration = sum(dts)
 
-    def mean_at(scale):
-        return sum(realism.clip(c * scale, 60.0, 220.0) * dt
+    def mean_at(shift):
+        floor = realism.clip(realism.CADENCE_FLOOR_SPM * math.exp(shift),
+                             60.0, 220.0)
+        k = math.exp(shift)
+        return sum(realism.clip(c * k, floor, 220.0) * dt
                    for c, dt in zip(base, dts)) / duration
 
-    lo, hi = 0.0, 1.0
+    lo, hi = -1.0, 1.0
     while mean_at(hi) < target:
-        hi *= 2
+        hi += 1.0
+    while mean_at(lo) > target:
+        lo -= 1.0
     for _ in range(48):
         mid = (lo + hi) / 2
         if mean_at(mid) < target:
             lo = mid
         else:
             hi = mid
-    return [realism.clip(c * hi, 60.0, 220.0) for c in base]
+    k = math.exp(hi)
+    floor = realism.clip(realism.CADENCE_FLOOR_SPM * k, 60.0, 220.0)
+    return [realism.clip(c * k, floor, 220.0) for c in base]
 
 
 def _measure_coord(px, py, c_lat, c_lng):
@@ -367,37 +388,56 @@ def build(dist, dur, seed, start_ms, points_bd,
     w = realism.ar1_log_speed(times, base, rng)
     finish = realism.finish_deceleration(times, dur)
     walk = realism.walk_events(n_max, rng)
-    # 「走几步」和「起跑热身」都要重新归一化，否则总里程会被系统性拉低：
-    # 低速点的位移变少，但 target 距离不变，剩下的由后续点补上。
-    scale = 1.0
-    if sum(walk) / max(1e-9, len(walk)) < 0.999:
-        scale = n_max / sum(walk)
-    for i, tt in enumerate(times):
-        ramp = 1.0
-        if tt < 8.0:
-            ramp = min(0.85 + 0.15 * (tt / max(1.0, min(8.0, dur / 20))), 1.0)
-        km_done = (tt / dur) * dist / 1000.0
-        fatigue = 1.03 if km_done <= 0.5 else max(1.03 - 0.06 * (km_done - 0.5), 0.80)
-        wave = (1.0
-                + 0.010 * math.sin(math.tau * tt / 115.0 + phase_v)
-                + 0.035 * math.sin(math.tau * tt / 47.0 + phase_v * 2.3)
-                + 0.015 * math.sin(math.tau * tt / 19.0 + phase_v * 3.7)) * _dip_factor(tt, dips)
-        w[i] *= ramp * fatigue * wave * finish[i] * walk[i] * scale
-        if joint_controls is not None:
-            transient = (joint_controls.start_transient * max(0.0, 1.0 - tt / max(1.0, dur * 0.2)) -
-                         joint_controls.finish_transient * max(0.0, (tt / max(1.0, dur) - 0.8) / 0.2))
-            w[i] *= 1.0 + transient
 
     # 末段就是「最后一个采样点到 dur」的真实间隔：可能不足 1s（非整秒收尾），
     # 但不能像旧实现那样下限抬到 1s —— 那会让 Σdt > dur，把总时长篡改掉。
     dts = [times[i + 1] - times[i] for i in range(n_max - 1)]
     dts.append(max(0.0, dur - times[-1]))
-    if joint_controls is not None and joint_controls.speed_sigma:
-        residual = 0.0
-        for i, dt in enumerate(dts):
-            alpha = math.exp(-dt / joint_controls.speed_tau_s)
-            residual = alpha * residual + math.sqrt(max(0.0, 1.0 - alpha * alpha)) * speed_rng.gauss(0.0, joint_controls.speed_sigma)
-            w[i] *= math.exp(residual)
+    total_dt = sum(dts)
+
+    # ── 速度包络：解析式 + 包络内归一化 ──────────────────────────
+    # 起跑惯性 ramp(t) = R0 + (1−R0)·(1−exp(−t/τ))，τ≈4s（文献 §2.5 一阶惯性）
+    # 疲劳     f(d)    = 1 − A·(1−exp(−d/D))，A=0.12、D=0.5·全程（文献 §2.2）
+    # 两项都全程单调平滑、没有平台段。归一化（时间加权均值 = 1）必须发生在
+    # 包络内部，不能靠 fit_speeds 事后把整体均值拉回来：旧实现的 ramp 最低只
+    # 到 0.85、疲劳又在前 500m 抬到 1.03，fit_speeds 为补回被扣掉的里程把全段
+    # 一起抬高，于是起步 600m 峰值被放大到 4.271m/s（1.41× 均速）；疲劳项
+    # max(1.03−0.06·(km−0.5), 0.80) 在 4.3333km 撞底后完全平坦、撞底处斜率突变。
+    envelope = []
+    for i, tt in enumerate(times):
+        inertia = (realism.START_INERTIA_RATIO +
+                   (1.0 - realism.START_INERTIA_RATIO) *
+                   (1.0 - math.exp(-tt / realism.START_INERTIA_TAU)))
+        fatigue = 1.0 - realism.FATIGUE_AMP * (
+            1.0 - math.exp(-tt / max(1e-9, dur * realism.FATIGUE_DIST_FRAC)))
+        wave = (1.0
+                + 0.010 * math.sin(math.tau * tt / 115.0 + phase_v)
+                + 0.035 * math.sin(math.tau * tt / 47.0 + phase_v * 2.3)
+                + 0.015 * math.sin(math.tau * tt / 19.0 + phase_v * 3.7)) * _dip_factor(tt, dips)
+        envelope.append(inertia * fatigue * wave * finish[i] * walk[i])
+    env_mean = sum(e * dt for e, dt in zip(envelope, dts)) / max(1e-9, total_dt)
+    if env_mean > 0:
+        w = [speed * env / env_mean for speed, env in zip(w, envelope)]
+
+    # ── 波动幅度归一（log 域等比缩放）───────────────────────────
+    # 真实 Keep 逐点 cv≈0.21（对数稳态 sd≈0.2077）。AR 过程本身给 0.187，
+    # 再叠上正弦/降速/步行/末段后实测被抬到 cv 0.236、极差 0.93~4.64m/s。
+    # 把合成后的对数偏差整体缩放到标定 sd：点的排序、lag 自相关、与步频的
+    # 单调关系全部不变，只有幅度被压回经验值。可选 joint_controls 的残差在
+    # 这一步之后才乘上去，因此不会吞掉用户显式要求的额外波动。
+    logs = [math.log(max(1e-9, speed)) for speed in w]
+    log_mean = sum(logs) / max(1, len(logs))
+    log_sd = math.sqrt(sum((x - log_mean) ** 2 for x in logs) / max(1, len(logs)))
+    if log_sd > 1e-9:
+        gain = realism.clip(realism.SPEED_LOG_SD_TARGET / log_sd, 0.40, 1.60)
+        w = [math.exp(log_mean + gain * (x - log_mean)) for x in logs]
+
+    if joint_controls is not None:
+        for i, tt in enumerate(times):
+            transient = (joint_controls.start_transient * max(0.0, 1.0 - tt / max(1.0, dur * 0.2)) -
+                         joint_controls.finish_transient * max(0.0, (tt / max(1.0, dur) - 0.8) / 0.2))
+            w[i] *= 1.0 + transient
+
     if heights is not None:
         # 用预计路径位置处的坡度调节速度分配，之后重新满足目标总里程。
         cumulative = 0.0
@@ -411,26 +451,69 @@ def build(dist, dur, seed, start_ms, points_bd,
             cumulative += ds
     fit_speeds(w, dts, dist, floor=realism.SPEED_FLOOR_POINT,
                ceil=realism.SPEED_CEIL_POINT)
+    # ── 低速持续性约束 ─────────────────────────────────────────
+    # 低于 LOW_SPEED_RATIO×当前均速的采样点最多连续 LOW_SPEED_RUN_MAX 个。真实数据
+    # 里连续多点低速只来自「终点停表」和「定位丢失」；用户反馈的「异常的低值
+    # 持续」正指这类段。超出的点从门槛值起在对数域线性抬升到段后第一个正常点，
+    # 既不断档也不生成平台。
+    # 必须放在 fit_speeds 之后：fit_speeds 会整体缩放，缩放前满足的门槛相对关系
+    # 会被它重新打破（实测 1/2/3 圈分别出现 2/4/3 连段）。抬升后整体均匀缩回目标
+    # 里程——均匀缩放同时缩放均速与门槛，所以约束在缩放后仍然成立。
+    def _cap_low_runs(values, gate, max_run):
+        out = list(values)
+        k = 0
+        while k < len(out):
+            if out[k] >= gate:
+                k += 1
+                continue
+            end = k
+            while end < len(out) and out[end] < gate:
+                end += 1
+            if end - k > max_run:
+                tail = k + max_run
+                resume = out[end] if end < len(out) else gate * 1.10
+                span = end - tail
+                for m in range(tail, end):
+                    frac = (m - tail + 1) / span
+                    out[m] = gate * (resume / gate) ** frac
+            k = end
+        return out
+
+    speed_mean = sum(x * dt for x, dt in zip(w, dts)) / max(1e-9, total_dt)
+    cap_gate = (realism.LOW_SPEED_RATIO * realism.LOW_SPEED_GATE_MARGIN *
+                speed_mean)
+    w = _cap_low_runs(w, cap_gate, realism.LOW_SPEED_RUN_MAX)
+    capped_total = sum(x * dt for x, dt in zip(w, dts))
+    if capped_total > 0:
+        restore = dist / capped_total
+        w = [realism.clip(x * restore, realism.SPEED_FLOOR_POINT,
+                          realism.SPEED_CEIL_POINT) for x in w]
     if ordered_path and abs(sum(speed * dt for speed, dt in zip(w, dts)) - dist) > 1.0:
         raise ValueError("速度拟合未达到规划里程，停止生成不完整路线")
     dim(f"速度拟合：{n_max} 点 平均 {dist/dur:.2f} m/s")
-    # 瞬时减速优先由步长吸收；只有持续变慢才降低步频。独立的平滑
-    # 步频波动避免把每个速度起伏机械地变成同步的步频起伏。
+    # 步频用瞬时速度代入经验幂律 171.43·(v/3)^0.28（realism.cadence_for_speed）。
+    # 经验式本身就是在同一采样区间上标定的短窗关系（Keep 的累计步数/距离短窗），
+    # 所以这里直接对区间自身速度求值，不再套 15s（或任何一阶）滞后：实测一阶
+    # 滞后会把 dln(cad)/dln(v) 从 0.28 压到 τ=3s 的 0.21、τ=15s 的 0.16，并让
+    # 落盘步长系统性偏离 1.05·(v/3)^0.72。
+    # 注意：cadence_noise 的 rng 抽取必须保持位置与次数不变——它是 legacy 流，
+    # tests/test_track_joint_controls.py 会逐项比对 rng 状态（cadence-only 参数
+    # 只允许影响 steps）。
     cadence_base = []
-    smooth_speed = w[0]
+    control_speed = w[0]
     cadence_residual = 0.0
     cadence_noise = 0.0
     for v, dt in zip(w, dts):
-        tau = joint_controls.cadence_tau_s if joint_controls is not None else 15.0
-        alpha = 1.0 - math.exp(-dt / tau)
-        smooth_speed += alpha * (v - smooth_speed)
         cadence_noise = (0.75 * cadence_noise +
                          math.sqrt(1.0 - 0.75 ** 2) * rng.gauss(0.0, 3.0))
-        response = realism.cadence_for_speed(smooth_speed)
+        response = realism.cadence_for_speed(v)
         if joint_controls is not None:
-            response += joint_controls.cadence_slope_spm_per_mps * (smooth_speed - base)
+            tau_c = joint_controls.cadence_tau_s
+            c_alpha = 1.0 - math.exp(-dt / tau_c)
+            control_speed += c_alpha * (v - control_speed)
+            response += joint_controls.cadence_slope_spm_per_mps * (control_speed - base)
             if joint_controls.cadence_residual_spm:
-                ar = math.exp(-dt / max(1.0, joint_controls.cadence_tau_s))
+                ar = math.exp(-dt / max(1.0, tau_c))
                 cadence_residual = ar * cadence_residual + math.sqrt(1.0 - ar * ar) * cadence_rng.gauss(0.0, joint_controls.cadence_residual_spm)
             response += cadence_residual
         cadence_base.append(response + cadence_noise)
@@ -592,10 +675,11 @@ def build(dist, dur, seed, start_ms, points_bd,
         cad = cadence_series[i]
         if typ == -1:
             # 无效定位不等于停止迈步；旧拟合模式仍按经过的时间计步。
-            steps_acc += cad * dt / 60.0
+            d_steps = cad * dt / 60.0
         else:
             stride = realism.stride_for_speed(d_step / dt, cad) if dt else 0.0
-            steps_acc += d_step / stride if stride else 0.0
+            d_steps = d_step / stride if stride else 0.0
+        steps_acc += d_steps
 
         if typ == -1:
             avg_sp = round_to(dist_acc / max(1, t_acc), 4)
@@ -641,7 +725,9 @@ def build(dist, dur, seed, start_ms, points_bd,
             "validDis": round_to(dist_acc, 4),
             "validTime": int(round(t_acc)),
             "steps": int(steps_acc),
-            "stepDistance": 0.0,
+            # 本段平均步长 = 段内位移 / 段内步数。旧实现恒写 0.0，等于把这个
+            # 字段拆成"只能由外部反算"的空壳；步数与位移都已在上面算好，直接相除。
+            "stepDistance": round_to(d_step / d_steps, 4) if d_steps > 0 else 0.0,
             "gainTime": fmt_gain_time(start_ms + int(t_acc * 1000)),
             "gainTimeMs": start_ms + int(t_acc * 1000),
             "queueNum": 0, "coorType": "gcj02",

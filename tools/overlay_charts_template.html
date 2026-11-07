@@ -1,0 +1,1136 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>__TITLE__</title>
+<style>
+:root{
+  --ink:#22343a; --mut:#697d83; --line:#dde5e2; --bg:#f4f7f5; --card:#fff;
+  --acc:#1f6f8b; --warn:#c0392b; --sm:#eef4f2;
+  --speed:#1f6f8b; --cadence:#c2691f; --stride:#3f7a3a;
+}
+*{box-sizing:border-box}
+html,body{margin:0;padding:0}
+body{
+  background:var(--bg); color:var(--ink); padding:14px 16px 20px;
+  font:13px/1.45 -apple-system,"Segoe UI",Roboto,"Helvetica Neue","Microsoft YaHei",sans-serif;
+  -webkit-font-smoothing:antialiased;
+}
+h1{font-size:17px;margin:0 0 2px;letter-spacing:.2px}
+.sub{color:var(--mut);font-size:11.5px;margin-bottom:10px}
+.tag{display:inline-block;background:#e7efec;color:#3c555c;border-radius:3px;padding:1px 6px;margin-left:6px;font-size:10.5px;vertical-align:2px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:10px 12px;box-shadow:0 1px 2px rgba(20,40,45,.04)}
+.card h2{font-size:12px;margin:0 0 8px;color:var(--mut);font-weight:600;letter-spacing:.4px;text-transform:uppercase}
+#stats{display:flex;flex-wrap:wrap;gap:8px 14px;margin-bottom:12px}
+.stat{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:7px 10px;min-width:250px;flex:1 1 250px}
+.sn{font-size:12px;font-weight:600;margin-bottom:3px;display:flex;align-items:center;gap:5px}
+.sn i{width:8px;height:8px;border-radius:2px;display:inline-block}
+.sr{font-size:11px;color:#485f66;display:flex;flex-wrap:wrap;gap:3px 9px;align-items:baseline;padding:1px 0}
+.sr b{font-weight:600;font-size:10.5px;letter-spacing:.2px}
+.sr u{text-decoration:none;font-variant-numeric:tabular-nums;color:var(--ink);font-weight:600}
+.sr .u{color:var(--mut);font-size:10px}
+.st-empty{color:var(--mut);font-size:12px}
+.row1{display:grid;grid-template-columns:minmax(360px,1fr) 320px;gap:12px;margin-bottom:12px}
+@media (max-width:980px){.row1{grid-template-columns:1fr}}
+.mapbox{position:relative}
+#mapWrap{height:436px;position:relative;border-radius:6px;overflow:hidden;background:#fbfdfc;border:1px solid var(--line)}
+#mapCanvas{position:absolute;inset:0}
+#mapCanvas svg{width:100%;height:100%;display:block;touch-action:none;cursor:crosshair}
+.mapctl{position:absolute;top:8px;right:8px;display:flex;flex-direction:column;gap:4px;z-index:3}
+.mapctl button{
+  width:26px;height:26px;border:1px solid var(--line);background:rgba(255,255,255,.94);
+  border-radius:5px;cursor:pointer;color:#3c555c;font-size:14px;line-height:1;padding:0;
+}
+.mapctl button:hover{background:#eef4f2}
+.maplegend{position:absolute;left:8px;bottom:8px;background:rgba(255,255,255,.95);border:1px solid var(--line);border-radius:6px;padding:5px 8px;font-size:10.5px;color:#4a6169;z-index:3;display:flex;flex-direction:column;gap:3px}
+.lgr{display:flex;align-items:center;gap:5px}
+.ramp{width:44px;height:7px;border-radius:2px;background:linear-gradient(90deg,#2f6f8b,#4f9d5a 40%,#c9a227 70%,#c0603a)}
+.ramp2{color:var(--mut)}
+.mopt{display:flex;gap:10px;flex-wrap:wrap;font-size:11px;color:#4a6169;margin-top:8px}
+.mopt label{display:flex;align-items:center;gap:4px;cursor:pointer}
+.hint{color:#93a5a9;font-size:10.5px;margin-top:6px}
+#readout .rdh{display:flex;justify-content:space-between;align-items:baseline;font-size:12px;font-weight:600;border-bottom:1px solid var(--line);padding-bottom:6px;margin-bottom:6px}
+#readout .rdh span{color:var(--mut);font-weight:500;font-variant-numeric:tabular-nums}
+#readout .r{display:flex;justify-content:space-between;gap:8px;padding:3px 0;font-size:11.5px;border-bottom:1px dotted #eaf0ee}
+#readout .r:last-child{border-bottom:0}
+#readout .k{color:var(--mut)}
+#readout .v{font-variant-numeric:tabular-nums;font-weight:600;text-align:right}
+#readout .emp{display:block;font-style:normal;font-weight:400;font-size:10px;color:#8ba0a4}
+.rdbar{height:4px;background:#eef3f1;border-radius:2px;margin-top:8px;overflow:hidden}
+.rdbar i{display:block;height:100%;background:var(--acc);border-radius:2px}
+#readDs .dslab{font-size:10.5px;color:var(--mut);margin-bottom:2px}
+#readDs .dsr{display:flex;justify-content:space-between;gap:8px;font-size:11px;padding:1px 0}
+#readDs .dk{color:var(--mut)}
+#readDs .dv{font-variant-numeric:tabular-nums;font-weight:600}
+#readDs{margin-top:8px}
+.tshead{display:flex;flex-wrap:wrap;align-items:center;gap:8px 14px;margin-bottom:8px}
+.seg{display:inline-flex;border:1px solid var(--line);border-radius:6px;overflow:hidden}
+.seg button{
+  border:0;background:#fff;padding:4px 10px;font-size:11.5px;color:#4a6169;cursor:pointer;
+  border-right:1px solid var(--line);font-family:inherit;
+}
+.seg button:last-child{border-right:0}
+.seg button:hover{background:#f2f7f5}
+.seg button.on{background:var(--acc);color:#fff}
+.seglab{font-size:11px;color:var(--mut);margin-right:-8px}
+.ck{display:inline-flex;align-items:center;gap:4px;font-size:11.5px;color:#4a6169;cursor:pointer}
+.legend{display:flex;flex-wrap:wrap;gap:6px 16px;margin-left:auto}
+.lg-group{display:flex;flex-direction:column;gap:2px}
+.lg-h{font-size:9.5px;color:#9aacb0;letter-spacing:.5px;text-transform:uppercase}
+.lg-row{display:flex;align-items:center;gap:5px;font-size:11px;color:#41585f;cursor:pointer}
+.lg-row em{font-style:normal;color:var(--mut);font-size:10px}
+.lg-static{cursor:default}
+.lg-key{width:10px;height:10px;border-radius:2px;display:inline-block;flex:0 0 auto}
+.lg-key.line{width:16px;height:0;border-radius:0;border-top-width:2px;border-top-style:solid;background:none!important}
+.lg-key.line.raw{border-top-color:#7d939a}
+.lg-key.line.sm{border-top-color:#26434c;border-top-width:2.5px}
+.lg-key.line.emp{border-top-color:#8ba0a4;border-top-style:dashed}
+.lg-key.line.road{border-top-color:#9dadaa;border-top-width:1.6px;border-top-style:dashed}
+.seg.xaxis{border-color:var(--acc);box-shadow:0 0 0 2px rgba(31,111,139,.12)}
+.seglab.hl{color:var(--acc);font-weight:600}
+.lg-key.diamond{width:9px;height:9px;border-radius:1px;transform:rotate(45deg);background:var(--warn)}
+#panels{display:flex;flex-direction:column;gap:4px}
+.panel{position:relative}
+.panel svg{display:block;width:100%;touch-action:none;cursor:crosshair}
+.pbg{fill:#fcfdfd}
+.grid{stroke:#e3ebe8;stroke-width:1;fill:none}
+.vgrid{stroke:#eef3f1;stroke-width:1;fill:none}
+.axline{stroke:#c6d3cf;stroke-width:1;fill:none}
+.ylab{fill:#84999d;font-size:10.5px;text-anchor:end;font-variant-numeric:tabular-nums}
+.xlab{fill:#84999d;font-size:10.5px;text-anchor:middle;font-variant-numeric:tabular-nums}
+.ptitle{fill:#41585f;font-size:11.5px;font-weight:600}
+.pnote{fill:#96a8ab;font-weight:400;font-size:10.5px}
+.rawline{fill:none;stroke-width:1;opacity:.32}
+.smline{fill:none;stroke-width:2.1;stroke-linejoin:round;stroke-linecap:round}
+.empline{fill:none;stroke-width:1.2;stroke-dasharray:5 4;opacity:.55}
+.cursorline{stroke:#c0392b;stroke-width:1;stroke-dasharray:3 3;opacity:.75}
+.cursorlab{font-size:10px;font-weight:600;font-variant-numeric:tabular-nums}
+.curdot{stroke:#fff;stroke-width:1.2}
+.roadline{fill:none;stroke:#9dadaa;stroke-width:1.6;stroke-dasharray:6 4;stroke-linejoin:round;opacity:.9}
+.trackline{fill:none;stroke-width:2.6;stroke-linejoin:round;stroke-linecap:round;opacity:.95}
+.mtick circle{fill:#fff;stroke:#7d939a;stroke-width:1.2}
+.mtick text{fill:#5f757b;font-size:9.5px;paint-order:stroke;stroke:#fff;stroke-width:2.4px;stroke-linejoin:round}
+.uthalo{fill:#fff;opacity:.92}
+.utring{fill:#fff;stroke:var(--warn);stroke-width:1.7}
+.utdot{fill:var(--warn);stroke:#fff;stroke-width:.9}
+.uttxt{fill:var(--warn);font-size:9.5px;font-weight:600;paint-order:stroke;stroke:#fff;stroke-width:2.4px;stroke-linejoin:round}
+.cmark{fill:#a8862a;opacity:.72;stroke:#fff;stroke-width:1.1}
+.posHalo{fill:#1f6f8b;opacity:.16}
+.posRing{fill:#fff;stroke:#1f6f8b;stroke-width:2}
+.posDot{fill:#1f6f8b}
+.timeline{display:flex;align-items:center;gap:10px;margin-top:10px;padding-top:9px;border-top:1px solid var(--line)}
+.play{
+  border:1px solid var(--acc);background:#fff;color:var(--acc);border-radius:6px;
+  padding:5px 14px;font-size:12px;cursor:pointer;font-family:inherit;min-width:66px;
+}
+.play:hover{background:#eef4f7}
+.play.on{background:var(--acc);color:#fff}
+#slider{flex:1;accent-color:var(--acc);height:18px}
+.tlab{font-variant-numeric:tabular-nums;font-size:12px;color:#3c555c;min-width:118px;text-align:right}
+.empty{color:var(--mut);font-size:12px;padding:16px 4px}
+footer{color:#9aacb0;font-size:10.5px;margin-top:12px;text-align:center}
+</style>
+</head>
+<body>
+<h1>__TITLE__<span class="tag">离线单文件 · 可交互 · 无外链</span></h1>
+<div class="sub" id="subline">路线图与速度 / 步频 / 步长共享同一时间游标：在任一面板上移动指针、拖拽或播放，其余面板与路线图上的位置标记同步联动。</div>
+
+<div id="stats"></div>
+
+<div class="row1">
+  <div class="card mapbox">
+    <h2>路线图（Web Mercator 等比例）</h2>
+    <div id="mapWrap">
+      <div id="mapCanvas"></div>
+      <div class="mapctl">
+        <button type="button" data-mapact="in" title="放大">+</button>
+        <button type="button" data-mapact="out" title="缩小">&minus;</button>
+        <button type="button" data-mapact="reset" title="复位">&#8634;</button>
+      </div>
+      <div class="maplegend" id="mapLegend"></div>
+    </div>
+    <div class="mopt">
+      <label><input type="checkbox" id="ckRoad" checked> 原始高德折线（灰虚线对照）</label>
+      <label><input type="checkbox" id="ckSpeed"> 按速度着色</label>
+      <label><input type="checkbox" id="ckTurn" checked> 掉头 / 急弯标记</label>
+    </div>
+    <div class="hint">滚轮缩放 · 拖拽平移 · 指针靠近轨迹可直接定位时刻</div>
+  </div>
+
+  <div class="card">
+    <h2>游标读数</h2>
+    <div id="readout"></div>
+    <div id="readDs"></div>
+  </div>
+</div>
+
+<div class="card">
+  <h2 id="tsTitle">时间序列（共享时间轴）</h2>
+  <div class="tshead">
+    <span class="seglab">布局</span>
+    <div class="seg" id="segMode">
+      <button type="button" data-mode="facet">分面</button>
+      <button type="button" data-mode="overlay">叠加</button>
+    </div>
+    <span class="seglab">归一</span>
+    <div class="seg" id="segNorm">
+      <button type="button" data-norm="z">z-score</button>
+      <button type="button" data-norm="mm">min-max</button>
+    </div>
+    <span class="seglab hl">时间轴</span>
+    <div class="seg xaxis" id="segX" title="叠加查看时各轨迹时长不同：切到「按各自时长」把每条轨迹的横轴拉伸到 0–100%，形状即可横向对比">
+      <button type="button" data-x="abs">绝对</button>
+      <button type="button" data-x="norm">按各自时长</button>
+    </div>
+    <label class="ck"><input type="checkbox" id="ckSmooth" checked> 10s 平滑</label>
+    <label class="ck"><input type="checkbox" id="ckEmp" checked> 经验式参考</label>
+    <div class="legend" id="legend"></div>
+  </div>
+  <div id="panels"></div>
+  <div class="timeline">
+    <button type="button" class="play" id="btnPlay">播放</button>
+    <div class="seg" id="segRate">
+      <button type="button" data-rate="1">1&times;</button>
+      <button type="button" data-rate="4">4&times;</button>
+      <button type="button" data-rate="16">16&times;</button>
+    </div>
+    <input type="range" id="slider" min="0" max="1000" value="0" step="1">
+    <div class="tlab" id="tLabel">00:00 / 00:00</div>
+  </div>
+</div>
+
+<footer>键盘：← / → 单步移动游标，空格 播放 / 暂停。数据与脚本全部内联，可断网打开。</footer>
+
+<script id="payload" type="application/json">__PAYLOAD__</script>
+<script id="app">
+(function(){
+"use strict";
+var P = JSON.parse(document.getElementById("payload").textContent);
+var RAW = (P && P.series) ? P.series : [];
+var MCOL = { speed: "#1f6f8b", cadence: "#c2691f", stride: "#3f7a3a" };
+var PALETTE = ["#1f6f8b", "#c0603a", "#3f7a3a", "#7a5aa8", "#a8862a"];
+var METRICS = [
+  { k: "speed",   label: "速度", unit: "m/s", col: MCOL.speed,   dec: 2, lo: 0 },
+  { k: "cadence", label: "步频", unit: "spm", col: MCOL.cadence, dec: 1, lo: 0 },
+  { k: "stride",  label: "步长", unit: "m",   col: MCOL.stride,  dec: 2, lo: 0 }
+];
+var S = {
+  t: 0, tMax: 1, play: false, rate: 1, mode: "facet", norm: "z", xmode: "abs",
+  smooth: true, emp: true, raw: true,
+  visSeries: {}, visMetric: { speed: true, cadence: true, stride: true },
+  mapRoad: true, mapSpeed: false, mapTurn: true
+};
+
+function el(tag, at, inner){
+  var s = "<" + tag, k, v;
+  if (at) for (k in at){ v = at[k]; if (v === null || v === undefined) continue; s += " " + k + "=\"" + v + "\""; }
+  if (inner === undefined) return s + "/>";
+  return s + ">" + inner + "</" + tag + ">";
+}
+function n1(x){ return Math.round(x * 10) / 10; }
+function pad2(x){ return x < 10 ? "0" + x : "" + x; }
+function mmss(t){ t = Math.max(0, t); var m = Math.floor(t / 60), s = Math.floor(t - m * 60); return pad2(m) + ":" + pad2(s); }
+function fx(x, d){ return (x === null || x === undefined || !isFinite(x)) ? "-" : Number(x).toFixed(d); }
+function num(x, d){ var v = Number(x); return isFinite(v) ? v : d; }
+function lin(d0, d1, r0, r1){
+  var k = (d1 - d0) || 1e-9;
+  return { at: function(x){ return r0 + (x - d0) * (r1 - r0) / k; },
+           inv: function(p){ return d0 + (p - r0) * k / (r1 - r0); } };
+}
+function qtl(sorted, p){
+  var n = sorted.length; if (!n) return null;
+  var h = (n - 1) * p, i = Math.floor(h), f = h - i;
+  return (i + 1 < n) ? sorted[i] * (1 - f) + sorted[i + 1] * f : sorted[i];
+}
+function statsOf(a){
+  if (!a || !a.length) return null;
+  var s = a.slice().sort(function(x, y){ return x - y; }), sum = 0, i;
+  for (i = 0; i < a.length; i++) sum += a[i];
+  return { mean: sum / a.length, p1: qtl(s, 0.01), p50: qtl(s, 0.5), p95: qtl(s, 0.95), min: s[0], max: s[s.length - 1] };
+}
+function corrOf(a, b){
+  var n = Math.min(a.length, b.length); if (n < 3) return null;
+  var i, sa = 0, sb = 0;
+  for (i = 0; i < n; i++){ sa += a[i]; sb += b[i]; }
+  var ma = sa / n, mb = sb / n, va = 0, vb = 0, cab = 0, da, db;
+  for (i = 0; i < n; i++){ da = a[i] - ma; db = b[i] - mb; va += da * da; vb += db * db; cab += da * db; }
+  return (va > 0 && vb > 0) ? cab / Math.sqrt(va * vb) : null;
+}
+function nearIdx(T, t){
+  var lo = 0, hi = T.length - 1;
+  if (hi < 0) return -1;
+  while (lo < hi){ var m = (lo + hi) >> 1; if (T[m] < t) lo = m + 1; else hi = m; }
+  if (lo > 0 && Math.abs(T[lo - 1] - t) <= Math.abs(T[lo] - t)) return lo - 1;
+  return lo;
+}
+function interp(T, Y, t){
+  if (!T.length) return null;
+  if (t <= T[0]) return Y[0];
+  if (t >= T[T.length - 1]) return Y[Y.length - 1];
+  var i = nearIdx(T, t);
+  if (i + 1 >= T.length) return Y[i];
+  var span = T[i + 1] - T[i];
+  if (span <= 0) return Y[i];
+  var f = (t - T[i]) / span;
+  return Y[i] * (1 - f) + Y[i + 1] * f;
+}
+function roll(T, Y, win){
+  var n = T.length, out = new Array(n), lo = 0, hi = 0, sum = 0, half = win / 2, i;
+  for (i = 0; i < n; i++){
+    while (lo < n && T[lo] < T[i] - half){ sum -= Y[lo]; lo++; }
+    while (hi < n && T[hi] <= T[i] + half){ sum += Y[hi]; hi++; }
+    out[i] = (hi - lo) > 0 ? sum / (hi - lo) : Y[i];
+  }
+  return out;
+}
+function smoothOf(der, T, Y){
+  if (der && der.length >= 3){
+    var pairs = [], ok = true, i;
+    for (i = 0; i < der.length; i++){
+      var tt = num(der[i] && (der[i].t !== undefined ? der[i].t : der[i].time), NaN);
+      var vv = num(der[i] && (der[i].v !== undefined ? der[i].v : der[i].value), NaN);
+      if (!isFinite(tt) || !isFinite(vv)){ ok = false; break; }
+      pairs.push([tt, vv]);
+    }
+    if (ok && pairs.length >= 3){
+      pairs.sort(function(a, b){ return a[0] - b[0]; });
+      var dt = [], dv = [];
+      for (i = 0; i < pairs.length; i++){ dt.push(pairs[i][0]); dv.push(pairs[i][1]); }
+      return { t: dt, v: dv, src: "derived" };
+    }
+  }
+  return { t: T, v: roll(T, Y, 10), src: "roll10" };
+}
+function merc(lat, lng){
+  var la = Math.max(-85, Math.min(85, lat)) * Math.PI / 180;
+  return [lng * Math.PI / 180, -Math.log(Math.tan(Math.PI / 4 + la / 2))];
+}
+
+var SER = [];
+var I;
+for (I = 0; I < RAW.length; I++){
+  var raw = RAW[I] || {};
+  var pts = (raw.points || []).slice();
+  pts.sort(function(a, b){ return num(a.t, 0) - num(b.t, 0); });
+  var o = { name: raw.name || ("轨迹 " + (I + 1)), color: raw.color || PALETTE[I % PALETTE.length],
+            meta: raw.meta || {}, raw: raw, pts: pts };
+  var T = [], V = [], C = [], ST = [], EC = [], ES = [], D = [], LAT = [], LNG = [], UT = [], CR = [];
+  var j, p, v;
+  for (j = 0; j < pts.length; j++){
+    p = pts[j];
+    v = Math.max(0, num(p.v, 0));
+    T.push(num(p.t, 0));
+    V.push(v);
+    C.push(Math.max(0, num(p.cadence, 0)));
+    ST.push(Math.max(0, num(p.stride_m, 0)));
+    EC.push(p.emp_cadence === null || p.emp_cadence === undefined ? 171.43 * Math.pow(v / 3, 0.28) : num(p.emp_cadence, 0));
+    ES.push(p.emp_stride_m === null || p.emp_stride_m === undefined ? 1.05 * Math.pow(v / 3, 0.72) : num(p.emp_stride_m, 0));
+    D.push(num(p.dist_m, j ? D[j - 1] : 0));
+    LAT.push(num(p.lat, NaN));
+    LNG.push(num(p.lng, NaN));
+    UT.push(!!p.u_turn);
+    CR.push(p.corner_radius_m === null || p.corner_radius_m === undefined ? null : num(p.corner_radius_m, null));
+  }
+  o.T = T; o.V = V; o.C = C; o.ST = ST; o.EC = EC; o.ES = ES; o.D = D;
+  o.UT = UT; o.CR = CR; o.LAT = LAT; o.LNG = LNG;
+  var dv = raw.derived || {};
+  o.sm = { speed: smoothOf(dv.speed_10s, T, V), cadence: smoothOf(dv.cadence_10s, T, C), stride: smoothOf(dv.stride_10s, T, ST) };
+  o.st = { speed: statsOf(V), cadence: statsOf(C), stride: statsOf(ST), corrVC: corrOf(V, C) };
+  o.mx = []; o.my = [];
+  for (j = 0; j < T.length; j++){
+    var mm = (isFinite(LAT[j]) && isFinite(LNG[j])) ? merc(LAT[j], LNG[j]) : null;
+    o.mx.push(mm ? mm[0] : null);
+    o.my.push(mm ? mm[1] : null);
+  }
+  o.roadXY = null;
+  if (raw.route && raw.route.road && raw.route.road.length > 1){
+    o.roadXY = [];
+    for (j = 0; j < raw.route.road.length; j++){
+      var rp = raw.route.road[j];
+      if (!rp || rp.length < 2) continue;
+      var rr = merc(num(rp[0], NaN), num(rp[1], NaN));
+      if (isFinite(rr[0]) && isFinite(rr[1])) o.roadXY.push(rr);
+    }
+    if (!o.roadXY.length) o.roadXY = null;
+  }
+  SER.push(o);
+  S.visSeries[I] = true;
+  if (T.length && T[T.length - 1] > S.tMax) S.tMax = T[T.length - 1];
+}
+if (!SER.length || S.tMax <= 0) S.tMax = 1;
+S.t = 0;
+
+function metricVals(o, k){
+  return k === "speed" ? o.V : (k === "cadence" ? o.C : o.ST);
+}
+function metricEmp(o, k){
+  return k === "speed" ? null : (k === "cadence" ? o.EC : o.ES);
+}
+function visibleSeries(){
+  var out = [], i;
+  for (i = 0; i < SER.length; i++) if (S.visSeries[i]) out.push({ o: SER[i], i: i });
+  return out;
+}
+
+// ---- time axis: "abs" = one shared absolute time axis, "norm" = every series stretched to 0..100%
+function tEndOf(o){ return (o.T && o.T.length) ? o.T[o.T.length - 1] : 0; }
+function kOf(o){
+  if (S.xmode !== "norm") return 1;
+  var e = tEndOf(o);
+  return e > 1e-9 ? S.tMax / e : 1;
+}
+// axis time -> absolute time inside one series
+function tLocal(o, at){
+  var k = kOf(o);
+  return (k > 0) ? at / k : at;
+}
+// absolute time array -> axis time array (returns the same array when unscaled)
+function xT(o, arr){
+  if (S.xmode !== "norm" || !arr) return arr;
+  var k = kOf(o);
+  if (!(k > 0) || Math.abs(k - 1) < 1e-12) return arr;
+  var out = new Array(arr.length), i;
+  for (i = 0; i < arr.length; i++) out[i] = arr[i] * k;
+  return out;
+}
+function xlabText(at){
+  if (S.xmode === "norm") return (Math.round(1000 * at / (S.tMax || 1)) / 10) + "%";
+  return mmss(at);
+}
+function xNote(){ return S.xmode === "norm" ? " · x=各自时长占比" : ""; }
+// normalised axis: pick a tick count that lands on round percentages (0/12.5/25/...)
+function normTicks(w){
+  var want = Math.max(3, Math.round(w / 110)), choices = [4, 5, 8, 10], i, best = choices[0];
+  for (i = 0; i < choices.length; i++) if (Math.abs(choices[i] - want) < Math.abs(best - want)) best = choices[i];
+  return best;
+}
+function xStepFor(w){
+  return S.xmode === "norm" ? (S.tMax / normTicks(w)) : niceStep(S.tMax, Math.max(2, Math.round(w / 120)));
+}
+
+function esc(s){
+  return String(s === null || s === undefined ? "" : s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+function niceStep(span, target){
+  if (!(span > 0)) return 1;
+  var raw = span / Math.max(1, target);
+  var pw = Math.pow(10, Math.floor(Math.log(raw) / Math.LN10));
+  var nrm = raw / pw;
+  var mult = nrm <= 1 ? 1 : (nrm <= 2 ? 2 : (nrm <= 2.5 ? 2.5 : (nrm <= 5 ? 5 : 10)));
+  return mult * pw;
+}
+function fmtTick(v, step){
+  var dec = step >= 1 ? 0 : (step >= 0.1 ? 1 : 2);
+  return Number(v).toFixed(dec);
+}
+function linePath(T, Y, xx, yx){
+  var d = [], i, y, prev = false;
+  for (i = 0; i < T.length; i++){
+    y = Y[i];
+    if (y === null || y === undefined || !isFinite(y)){ prev = false; continue; }
+    d.push((prev ? "L" : "M") + xx.at(T[i]).toFixed(1) + " " + yx.at(y).toFixed(1));
+    prev = true;
+  }
+  return d.join(" ");
+}
+var RAMP = [[0, "#2f6f8b"], [0.40, "#4f9d5a"], [0.70, "#c9a227"], [1, "#c0603a"]];
+function rgbOf(h){ return [parseInt(h.substr(1, 2), 16), parseInt(h.substr(3, 2), 16), parseInt(h.substr(5, 2), 16)]; }
+var RW = RAMP.map(function(r){ return [r[0], rgbOf(r[1])]; });
+function rampCol(f){
+  f = Math.max(0, Math.min(1, f));
+  var i = 0, c = [0, 0, 0], ch;
+  while (i < RW.length - 2 && f > RW[i + 1][0]) i++;
+  var a = RW[i], b = RW[i + 1];
+  var k = (f - a[0]) / ((b[0] - a[0]) || 1e-9);
+  for (ch = 0; ch < 3; ch++) c[ch] = Math.round(a[1][ch] + (b[1][ch] - a[1][ch]) * k);
+  return "rgb(" + c[0] + "," + c[1] + "," + c[2] + ")";
+}
+
+var MAPV = { W: 640, H: 436, s: 1, cx: 0, cy: 0, init: false };
+function proj(x, y){ return [(x - MAPV.cx) * MAPV.s + MAPV.W / 2, (y - MAPV.cy) * MAPV.s + MAPV.H / 2]; }
+function mapBounds(){
+  var b = null, vis = visibleSeries(), i, j, o, x, y;
+  function add(px, py){
+    if (px === null || py === null || !isFinite(px) || !isFinite(py)) return;
+    if (!b) b = { x0: px, x1: px, y0: py, y1: py };
+    else { if (px < b.x0) b.x0 = px; if (px > b.x1) b.x1 = px; if (py < b.y0) b.y0 = py; if (py > b.y1) b.y1 = py; }
+  }
+  for (i = 0; i < vis.length; i++){
+    o = vis[i].o;
+    for (j = 0; j < o.mx.length; j++) add(o.mx[j], o.my[j]);
+    if (o.roadXY) for (j = 0; j < o.roadXY.length; j++) add(o.roadXY[j][0], o.roadXY[j][1]);
+  }
+  return b;
+}
+function fitMap(){
+  var b = mapBounds(), W = MAPV.W, H = MAPV.H, pad = 26;
+  if (!b){ MAPV.cx = 0; MAPV.cy = 0; MAPV.s = 1; return; }
+  var bw = Math.max(1e-9, b.x1 - b.x0), bh = Math.max(1e-9, b.y1 - b.y0);
+  var s = Math.min((W - 2 * pad) / bw, (H - 2 * pad) / bh);
+  if (!isFinite(s) || s <= 0) s = Math.min(W, H) / 2;
+  MAPV.s = s;
+  MAPV.cx = (b.x0 + b.x1) / 2;
+  MAPV.cy = (b.y0 + b.y1) / 2;
+}
+function zoomAt(px, py, k){
+  var before = [(px - MAPV.W / 2) / MAPV.s + MAPV.cx, (py - MAPV.H / 2) / MAPV.s + MAPV.cy];
+  MAPV.s = Math.max(1e-6, MAPV.s * k);
+  MAPV.cx = before[0] - (px - MAPV.W / 2) / MAPV.s;
+  MAPV.cy = before[1] - (py - MAPV.H / 2) / MAPV.s;
+  drawMap();
+}
+
+function drawMapLegend(){
+  var host = document.getElementById("mapLegend");
+  if (!host) return;
+  var h = [], vis = visibleSeries(), anyRoad = false, i;
+  for (i = 0; i < vis.length; i++) if (vis[i].o.roadXY) anyRoad = true;
+  if (vis.length){
+    h.push("<div class='lgr'><span class='lg-key line' style='border-top-color:" + vis[0].o.color +
+           ";border-top-width:2.6px'></span><span>拟人化轨迹</span></div>");
+  }
+  if (S.mapRoad && anyRoad){
+    h.push("<div class='lgr'><span class='lg-key line road'></span><span>原始高德折线（参考）</span></div>");
+  }
+  if (S.mapSpeed){
+    h.push("<div class='lgr'><span class='ramp'></span><span>慢</span><span class='ramp2'>快</span></div>");
+  }
+  if (S.mapTurn) h.push("<div class='lgr'><svg width='14' height='14' viewBox='-7 -7 14 14'><path d='M0 -6 L6 0 L0 6 L-6 0 Z' fill='#c0392b' stroke='#fff' stroke-width='1.2'/></svg><span>掉头</span></div>");
+  host.innerHTML = h.join("");
+}
+
+function drawMap(){
+  var host = document.getElementById("mapCanvas");
+  if (!host) return;
+  var wrap = document.getElementById("mapWrap");
+  var W = Math.max(240, Math.round((wrap && wrap.clientWidth) || 640));
+  var H = Math.max(200, Math.round((wrap && wrap.clientHeight) || 436));
+  MAPV.W = W; MAPV.H = H;
+  if (!MAPV.init){ fitMap(); MAPV.init = true; }
+  var vis = visibleSeries(), i, j, o, k, out = [];
+  out.push("<svg width='100%' height='100%' viewBox='0 0 " + W + " " + H + "'>");
+  out.push("<defs><clipPath id='mclip'><rect x='0' y='0' width='" + W + "' height='" + H + "'/></clipPath></defs>");
+  out.push("<g class='grid'>");
+  for (k = 0; k <= W; k += 48) out.push("<line x1='" + k + "' y1='0' x2='" + k + "' y2='" + H + "'/>");
+  for (k = 0; k <= H; k += 48) out.push("<line x1='0' y1='" + k + "' x2='" + W + "' y2='" + k + "'/>");
+  out.push("</g><g clip-path='url(#mclip)'>");
+
+  if (S.mapRoad){
+    for (i = 0; i < vis.length; i++){
+      o = vis[i].o;
+      if (!o.roadXY) continue;
+      var rp = [];
+      for (j = 0; j < o.roadXY.length; j++){
+        var q = proj(o.roadXY[j][0], o.roadXY[j][1]);
+        rp.push(q[0].toFixed(1) + "," + q[1].toFixed(1));
+      }
+      out.push("<polyline class='roadline' points='" + rp.join(" ") + "'/>");
+    }
+  }
+
+  var vmax = 0.001;
+  for (i = 0; i < vis.length; i++) if (vis[i].o.st.speed) vmax = Math.max(vmax, vis[i].o.st.speed.max);
+  for (i = 0; i < vis.length; i++){
+    o = vis[i].o;
+    if (o.mx.length < 2) continue;
+    if (S.mapSpeed && o.st.speed){
+      var buckets = {}, key;
+      for (j = 1; j < o.mx.length; j++){
+        if (o.mx[j] === null || o.my[j] === null || o.mx[j - 1] === null || o.my[j - 1] === null) continue;
+        key = Math.min(11, Math.floor(12 * Math.max(0, Math.min(1, o.V[j] / vmax))));
+        var p1 = proj(o.mx[j - 1], o.my[j - 1]), p2 = proj(o.mx[j], o.my[j]);
+        if (!buckets[key]) buckets[key] = [];
+        buckets[key].push("M" + p1[0].toFixed(1) + " " + p1[1].toFixed(1) + "L" + p2[0].toFixed(1) + " " + p2[1].toFixed(1));
+      }
+      for (key in buckets){
+        if (!buckets.hasOwnProperty(key)) continue;
+        out.push("<path class='trackline' stroke='" + rampCol((key - 0.5) / 12) + "' d='" + buckets[key].join("") + "'/>");
+      }
+    } else {
+      var tp = [];
+      for (j = 0; j < o.mx.length; j++){
+        if (o.mx[j] === null || o.my[j] === null) continue;
+        var pq = proj(o.mx[j], o.my[j]);
+        tp.push(pq[0].toFixed(1) + "," + pq[1].toFixed(1));
+      }
+      out.push("<polyline class='trackline' stroke='" + o.color + "' points='" + tp.join(" ") + "'/>");
+    }
+  }
+
+  // distance ticks on the primary series
+  if (vis.length){
+    var po = vis[0].o, maxD = po.D.length ? po.D[po.D.length - 1] : 0;
+    var stepD = maxD > 8000 ? 2000 : (maxD > 4000 ? 1000 : (maxD > 2000 ? 500 : (maxD > 800 ? 200 : 100)));
+    var next = stepD, lab = 0;
+    for (j = 0; j < po.D.length; j++){
+      if (po.D[j] < next || po.mx[j] === null) continue;
+      var pk = proj(po.mx[j], po.my[j]);
+      if (pk[0] > 4 && pk[0] < W - 4 && pk[1] > 4 && pk[1] < H - 4){
+        out.push("<g class='mtick'><circle cx='" + pk[0].toFixed(1) + "' cy='" + pk[1].toFixed(1) + "' r='3'/><text x='" + (pk[0] + 5).toFixed(1) + "' y='" + (pk[1] - 5).toFixed(1) + "'>" + (next >= 1000 ? (next / 1000).toFixed(1) + " km" : next + " m") + "</text></g>");
+        lab++;
+      }
+      next += stepD;
+    }
+  }
+
+  // turns: several series usually trace the same route, so draw one marker per physical spot
+  if (S.mapTurn){
+    var shownLab = 0, seenUT = {}, seenC = {};
+    function cell(px, py){ return Math.round(px / 10) + ":" + Math.round(py / 10); }
+    for (i = 0; i < vis.length; i++){
+      o = vis[i].o;
+      for (j = 0; j < o.UT.length; j++){
+        if (!o.UT[j] || o.mx[j] === null) continue;
+        var pu = proj(o.mx[j], o.my[j]), ku = cell(pu[0], pu[1]);
+        if (seenUT[ku]) continue;
+        seenUT[ku] = 1;
+        out.push("<g class='uturn' transform='translate(" + pu[0].toFixed(1) + "," + pu[1].toFixed(1) + ")'>" +
+                 "<circle r='10.6' class='uthalo'/><circle r='7.4' class='utring'/>" +
+                 "<path d='M0 -4.9 L4.9 0 L0 4.9 L-4.9 0 Z' class='utdot'/></g>");
+        if (shownLab < 8){
+          out.push("<text class='uttxt' x='" + (pu[0] + 11).toFixed(1) + "' y='" + (pu[1] + 3.5).toFixed(1) + "'>掉头</text>");
+          shownLab++;
+        }
+      }
+      for (j = 0; j < o.CR.length; j++){
+        if (o.CR[j] === null || o.UT[j]) continue;
+        if (!(o.CR[j] < 8) || o.mx[j] === null) continue;
+        var pc = proj(o.mx[j], o.my[j]), kc = cell(pc[0], pc[1]);
+        if (seenUT[kc] || seenC[kc]) continue;
+        seenC[kc] = 1;
+        out.push("<circle class='cmark' cx='" + pc[0].toFixed(1) + "' cy='" + pc[1].toFixed(1) + "' r='3.4'/>");
+      }
+    }
+  }
+  out.push("</g>");
+  out.push("<g id='posG' class='posG' transform='translate(-99,-99)'><circle class='posHalo' r='11'/><circle class='posRing' r='6.5'/><circle class='posDot' r='2.6'/></g>");
+  out.push("</svg>");
+  host.innerHTML = out.join("");
+  drawMapLegend();
+  updateCursor();
+}
+
+function sdOf(o, k){
+  if (!o.sd) o.sd = {};
+  if (o.sd[k] === undefined){
+    var a = metricVals(o, k), n = a.length, s = 0, q = 0, i, d;
+    for (i = 0; i < n; i++) s += a[i];
+    var mu = n ? s / n : 0;
+    for (i = 0; i < n; i++){ d = a[i] - mu; q += d * d; }
+    o.sd[k] = n ? Math.sqrt(q / n) : 0;
+  }
+  return o.sd[k];
+}
+function normOf(o, k){
+  var st = o.st[k] || { mean: 0, min: 0, max: 1 };
+  if (S.norm === "z"){
+    var mu = st.mean || 0, sd = sdOf(o, k) || 1;
+    return { at: function(v){ return (v - mu) / sd; } };
+  }
+  var a = st.min || 0, b = (st.max - st.min) || 1;
+  return { at: function(v){ return (v - a) / b; } };
+}
+var MDASH = { speed: "", cadence: "7 4", stride: "2 3" };
+
+var PGEO = [];
+function panelWrap(inner){ return "<div class='panel'>" + inner + "</div>"; }
+
+function facetSvg(m, vis, multi, W, H){
+  var L = 46, R = 58, T = 24, B = 24, x0 = L, x1 = W - R, y0 = T, y1 = H - B;
+  var lo = Infinity, hi = -Infinity, i, j, o;
+  function see(v){
+    if (v === null || v === undefined || !isFinite(v)) return;
+    if (v < lo) lo = v; if (v > hi) hi = v;
+  }
+  for (i = 0; i < vis.length; i++){
+    o = vis[i].o;
+    var vals = metricVals(o, m.k);
+    for (j = 0; j < vals.length; j++) see(vals[j]);
+    if (S.smooth && o.sm[m.k]) for (j = 0; j < o.sm[m.k].v.length; j++) see(o.sm[m.k].v[j]);
+    if (S.emp){ var emp = metricEmp(o, m.k); if (emp) for (j = 0; j < emp.length; j++) see(emp[j]); }
+  }
+  if (!isFinite(lo)){ lo = 0; hi = 1; }
+  if (hi <= lo) hi = lo + 1;
+  var pd = (hi - lo) * 0.10;
+  lo = Math.max(0, lo - pd); hi = hi + pd;
+  var yx = lin(lo, hi, y1, y0), xx = lin(0, S.tMax, x0, x1);
+  var s = [];
+  s.push("<svg width='100%' height='" + H + "' viewBox='0 0 " + W + " " + H + "'>");
+  s.push("<rect class='pbg' x='" + x0 + "' y='" + y0 + "' width='" + (x1 - x0) + "' height='" + (y1 - y0) + "'/>");
+  var ystep = niceStep(hi - lo, 4), v;
+  for (v = Math.ceil(lo / ystep) * ystep; v <= hi + 1e-9; v += ystep){
+    var py = yx.at(v);
+    if (py < y0 - 1 || py > y1 + 1) continue;
+    s.push("<line class='grid' x1='" + x0 + "' y1='" + py.toFixed(1) + "' x2='" + x1 + "' y2='" + py.toFixed(1) + "'/>");
+    s.push("<text class='ylab' x='" + (x0 - 7) + "' y='" + (py + 3.4).toFixed(1) + "'>" + fmtTick(v, ystep) + "</text>");
+  }
+  var xstep = xStepFor(x1 - x0), tt;
+  for (tt = 0; tt <= S.tMax + 1e-9; tt += xstep){
+    var pxx = xx.at(tt);
+    s.push("<line class='vgrid' x1='" + pxx.toFixed(1) + "' y1='" + y0 + "' x2='" + pxx.toFixed(1) + "' y2='" + y1 + "'/>");
+    s.push("<text class='xlab' x='" + pxx.toFixed(1) + "' y='" + (H - 8) + "'>" + xlabText(tt) + "</text>");
+  }
+  s.push("<line class='axline' x1='" + x0 + "' y1='" + y1 + "' x2='" + x1 + "' y2='" + y1 + "'/>");
+  s.push("<text class='ptitle' x='" + x0 + "' y='14'><tspan fill='" + m.col + "'>●</tspan> " + m.label + "<tspan class='pnote'> " + m.unit + xNote() + "</tspan></text>");
+  var items = [];
+  for (i = 0; i < vis.length; i++){
+    o = vis[i].o;
+    var col = multi ? o.color : m.col;
+    var d0 = linePath(xT(o, o.T), metricVals(o, m.k), xx, yx);
+    if (d0) s.push("<path class='rawline' stroke='" + col + "' d='" + d0 + "'/>");
+    if (S.smooth && o.sm[m.k]){
+      var d1 = linePath(xT(o, o.sm[m.k].t), o.sm[m.k].v, xx, yx);
+      if (d1) s.push("<path class='smline' stroke='" + col + "' d='" + d1 + "'/>");
+    }
+    if (S.emp){
+      var emp = metricEmp(o, m.k);
+      if (emp){
+        var d2 = linePath(xT(o, o.T), emp, xx, yx);
+        if (d2) s.push("<path class='empline' stroke='" + col + "' d='" + d2 + "'/>");
+      }
+    }
+    items.push({ o: o, m: m, col: col, yAt: (function(sc){ return function(val){ return sc.at(val); }; })(yx) });
+  }
+  s.push("<g class='curG'></g></svg>");
+  PGEO.push({ kind: "facet", m: m, xx: xx, y0: y0, y1: y1, items: items, w: W, h: H, x0: x0, x1: x1 });
+  return s.join("");
+}
+
+function overlaySvg(vis, multi, W, H){
+  var L = 46, R = 66, T = 24, B = 24, x0 = L, x1 = W - R, y0 = T, y1 = H - B;
+  var lo = Infinity, hi = -Infinity, i, j, mi, o, m, items = [];
+  for (i = 0; i < vis.length; i++){
+    o = vis[i].o;
+    for (mi = 0; mi < METRICS.length; mi++){
+      m = METRICS[mi];
+      if (!S.visMetric[m.k]) continue;
+      var nf = normOf(o, m.k);
+      var col = multi ? o.color : m.col;
+      var it = { o: o, m: m, col: col, nf: nf };
+      items.push(it);
+      var vals = metricVals(o, m.k), z;
+      for (j = 0; j < vals.length; j++){ z = nf.at(vals[j]); if (z < lo) lo = z; if (z > hi) hi = z; }
+      if (S.smooth && o.sm[m.k]) for (j = 0; j < o.sm[m.k].v.length; j++){ z = nf.at(o.sm[m.k].v[j]); if (z < lo) lo = z; if (z > hi) hi = z; }
+      if (S.emp){
+        var emp = metricEmp(o, m.k);
+        if (emp) for (j = 0; j < emp.length; j++){ z = nf.at(emp[j]); if (z < lo) lo = z; if (z > hi) hi = z; }
+      }
+    }
+  }
+  if (!isFinite(lo)){ lo = -1; hi = 1; }
+  if (hi <= lo) hi = lo + 1;
+  var pd = (hi - lo) * 0.08;
+  lo -= pd; hi += pd;
+  var yx = lin(lo, hi, y1, y0), xx = lin(0, S.tMax, x0, x1);
+  var s = [];
+  s.push("<svg width='100%' height='" + H + "' viewBox='0 0 " + W + " " + H + "'>");
+  s.push("<rect class='pbg' x='" + x0 + "' y='" + y0 + "' width='" + (x1 - x0) + "' height='" + (y1 - y0) + "'/>");
+  var ystep = niceStep(hi - lo, 5), v;
+  for (v = Math.ceil(lo / ystep) * ystep; v <= hi + 1e-9; v += ystep){
+    var py = yx.at(v);
+    if (py < y0 - 1 || py > y1 + 1) continue;
+    s.push("<line class='grid' x1='" + x0 + "' y1='" + py.toFixed(1) + "' x2='" + x1 + "' y2='" + py.toFixed(1) + "'/>");
+    s.push("<text class='ylab' x='" + (x0 - 7) + "' y='" + (py + 3.4).toFixed(1) + "'>" + (S.norm === "z" ? Number(v).toFixed(1) + "σ" : Math.round(v * 100) + "%") + "</text>");
+  }
+  var xstep = xStepFor(x1 - x0), tt;
+  for (tt = 0; tt <= S.tMax + 1e-9; tt += xstep){
+    var pxx = xx.at(tt);
+    s.push("<line class='vgrid' x1='" + pxx.toFixed(1) + "' y1='" + y0 + "' x2='" + pxx.toFixed(1) + "' y2='" + y1 + "'/>");
+    s.push("<text class='xlab' x='" + pxx.toFixed(1) + "' y='" + (H - 8) + "'>" + xlabText(tt) + "</text>");
+  }
+  s.push("<line class='axline' x1='" + x0 + "' y1='" + y1 + "' x2='" + x1 + "' y2='" + y1 + "'/>");
+  s.push("<text class='ptitle' x='" + x0 + "' y='14'>三指标叠加<tspan class='pnote'> " + (S.norm === "z" ? "z-score 归一" : "min-max 归一") + (multi ? " · 多轨迹按颜色区分" : "") + xNote() + "</tspan></text>");
+  for (i = 0; i < items.length; i++){
+    var it2 = items[i];
+    var yAt = (function(sc, nf2){ return function(val){ return sc.at(nf2.at(val)); }; })(yx, it2.nf);
+    it2.yAt = yAt;
+    var dash = multi ? MDASH[it2.m.k] : "";
+    var d = linePath(xT(it2.o, it2.o.T), metricVals(it2.o, it2.m.k), xx, yxAtWrap(yx, it2.nf));
+    if (d) s.push("<path class='smline' stroke='" + it2.col + "' stroke-dasharray='" + dash + "' opacity='0.92' d='" + d + "'/>");
+    if (S.emp){
+      var emp2 = metricEmp(it2.o, it2.m.k);
+      if (emp2){
+        var d2 = linePath(xT(it2.o, it2.o.T), emp2, xx, yxAtWrap(yx, it2.nf));
+        if (d2) s.push("<path class='empline' stroke='" + it2.col + "' stroke-dasharray='" + (dash || "2 4") + "' d='" + d2 + "'/>");
+      }
+    }
+  }
+  s.push("<g class='curG'></g></svg>");
+  PGEO.push({ kind: "overlay", xx: xx, y0: y0, y1: y1, items: items, w: W, h: H, x0: x0, x1: x1 });
+  return s.join("");
+}
+function yxAtWrap(yx, nf){
+  return { at: function(val){ return yx.at(nf.at(val)); } };
+}
+
+function drawPanels(){
+  var host = document.getElementById("panels");
+  if (!host) return;
+  var vis = visibleSeries();
+  PGEO = [];
+  if (!vis.length){ host.innerHTML = "<div class='empty'>没有勾选任何轨迹</div>"; return; }
+  var W = Math.max(320, Math.round(host.clientWidth || 720));
+  var multi = vis.length > 1, k, html = [];
+  if (S.mode === "facet"){
+    var any = false;
+    for (k = 0; k < METRICS.length; k++){
+      if (!S.visMetric[METRICS[k].k]) continue;
+      any = true;
+      html.push(panelWrap(facetSvg(METRICS[k], vis, multi, W, 178)));
+    }
+    if (!any){ host.innerHTML = "<div class='empty'>没有勾选任何指标</div>"; return; }
+  } else {
+    html.push(panelWrap(overlaySvg(vis, multi, W, 320)));
+  }
+  host.innerHTML = html.join("");
+  updateCursor();
+}
+
+function updateCursor(){
+  var i, j;
+  for (i = 0; i < PGEO.length; i++){
+    var g = PGEO[i];
+    var nodes = document.getElementById("panels").querySelectorAll(".curG");
+    var node = nodes[i];
+    if (!node) continue;
+    var px = g.xx.at(S.t), s = [];
+    s.push("<line class='cursorline' x1='" + px.toFixed(1) + "' y1='" + g.y0 + "' x2='" + px.toFixed(1) + "' y2='" + g.y1 + "'/>");
+    for (j = 0; j < g.items.length; j++){
+      var it = g.items[j];
+      var val = interp(it.o.T, metricVals(it.o, it.m.k), tLocal(it.o, S.t));
+      if (val === null || !isFinite(val)) continue;
+      var py = it.yAt(val);
+      if (!isFinite(py)) continue;
+      s.push("<circle class='curdot' cx='" + px.toFixed(1) + "' cy='" + py.toFixed(1) + "' r='3.3' fill='" + it.col + "'/>");
+      s.push("<text class='cursorlab' x='" + (px + 5).toFixed(1) + "' y='" + (py - 6).toFixed(1) + "' fill='" + it.col + "'>" + fx(val, it.m.dec) + "</text>");
+    }
+    node.innerHTML = s.join("");
+  }
+  var vis = visibleSeries();
+  var pg = document.getElementById("posG");
+  if (pg){
+    if (!vis.length){ pg.setAttribute("transform", "translate(-99,-99)"); }
+    else {
+      var o = vis[0].o, idx = nearIdx(o.T, tLocal(o, S.t)), x = o.mx[idx], y = o.my[idx];
+      if (x === null || y === null || !isFinite(x) || !isFinite(y)) pg.setAttribute("transform", "translate(-99,-99)");
+      else { var pp = proj(x, y); pg.setAttribute("transform", "translate(" + pp[0].toFixed(1) + "," + pp[1].toFixed(1) + ")"); }
+    }
+  }
+  drawReadout();
+}
+
+function row(k, v, emp){
+  return "<div class='r'><span class='k'>" + k + "</span><span class='v'>" + v + (emp ? "<em class='emp'>" + emp + "</em>" : "") + "</span></div>";
+}
+function smAt(o, k){
+  var d = o.sm && o.sm[k];
+  if (!d || !d.t || d.t.length < 2) return null;
+  var v = interp(d.t, d.v, S.t);
+  return (v === null || !isFinite(v)) ? null : v;
+}
+function dsRow(k, v, col){
+  return "<div class='dsr'><span class='dk'>" + k + "</span><span class='dv' style='color:" + col + "'>" + v + "</span></div>";
+}
+function drawReadout(){
+  var host = document.getElementById("readout");
+  if (!host) return;
+  var vis = visibleSeries();
+  if (!vis.length){ host.innerHTML = "<div class='rdh'>游标读数</div><div class='empty'>无序列</div>"; return; }
+  var o = vis[0].o, lt = tLocal(o, S.t), idx = nearIdx(o.T, lt), h = [];
+  var v = interp(o.T, o.V, lt), c = interp(o.T, o.C, lt), st = interp(o.T, o.ST, lt);
+  var ec = interp(o.T, o.EC, lt), es = interp(o.T, o.ES, lt), d = interp(o.T, o.D, lt);
+  h.push("<div class='rdh'>" + esc(o.name) + "<span>" + mmss(lt) + "</span></div>");
+  h.push(row("时间", fx(lt, 1) + " s", S.xmode === "norm"
+    ? "占比 " + (100 * S.t / (S.tMax || 1)).toFixed(1) + "% · 全程 " + mmss(tEndOf(o)) : ""));
+  if (S.xmode === "norm" && vis.length > 1){
+    var lts = [], vi;
+    for (vi = 0; vi < vis.length; vi++){
+      var oa = vis[vi].o;
+      lts.push("<span style='color:" + oa.color + "'>" + mmss(tLocal(oa, S.t)) + "</span>");
+    }
+    h.push(row("对齐时刻", lts.join(" · "), "各轨迹自身绝对时间"));
+  }
+  h.push(row("累计里程", fx(d, 1) + " m" , (d / 1000).toFixed(2) + " km"));
+  h.push(row("瞬时速度", fx(v, 2) + " m/s"));
+  h.push(row("步频", fx(c, 1) + " spm", "经验 " + fx(ec, 1)));
+  h.push(row("步长", fx(st, 3) + " m", "经验 " + fx(es, 3)));
+  var cr = (idx >= 0 && o.CR[idx] !== null) ? o.CR[idx] : null;
+  h.push(row("转弯半径", cr === null ? "-" : fx(cr, 1) + " m", (idx >= 0 && o.UT[idx]) ? "掉头点" : ""));
+  var total = tEndOf(o);
+  var frac = S.xmode === "norm" ? (S.t / (S.tMax || 1)) : (total > 0 ? S.t / total : 0);
+  h.push("<div class='rdbar'><i style='width:" + (Math.min(1, Math.max(0, frac)) * 100).toFixed(1) + "%'></i></div>");
+  host.innerHTML = h.join("");
+  var ds = document.getElementById("readDs");
+  if (ds){
+    var d2 = [];
+    d2.push("<div class='dslab'>10s 平滑值（曲线叠加所用）</div>");
+    var sv = smAt(o, "speed"), sc = smAt(o, "cadence"), ss = smAt(o, "stride");
+    d2.push(dsRow("速度", sv === null ? "-" : fx(sv, 2) + " m/s", METRICS[0].col));
+    d2.push(dsRow("步频", sc === null ? "-" : fx(sc, 1) + " spm", METRICS[1].col));
+    d2.push(dsRow("步长", ss === null ? "-" : fx(ss, 3) + " m", METRICS[2].col));
+    ds.innerHTML = d2.join("");
+  }
+}
+
+function drawStats(){
+  var host = document.getElementById("stats");
+  if (!host) return;
+  var vis = visibleSeries(), h = [], i;
+  if (!vis.length){ host.innerHTML = "<span class='st-empty'>无数据</span>"; return; }
+  for (i = 0; i < vis.length; i++){
+    var o = vis[i].o, j;
+    h.push("<div class='stat'><div class='sn'><i style='background:" + o.color + "'></i>" + esc(o.name) + "</div>");
+    for (j = 0; j < METRICS.length; j++){
+      var m = METRICS[j], st = o.st[m.k];
+      if (!st) continue;
+      h.push("<div class='sr'><b style='color:" + m.col + "'>" + m.label + "</b>" +
+             "<span>均值 <u>" + fx(st.mean, m.dec) + "</u></span><span>p1 <u>" + fx(st.p1, m.dec) + "</u></span>" +
+             "<span>p50 <u>" + fx(st.p50, m.dec) + "</u></span><span>p95 <u>" + fx(st.p95, m.dec) + "</u></span>" +
+             "<span>max <u>" + fx(st.max, m.dec) + "</u></span><i class='u'>" + m.unit + "</i></div>");
+    }
+    h.push("<div class='sr'><b>corr(v, 步频)</b><span><u>" + fx(o.st.corrVC, 4) + "</u></span><span>样本 <u>" + o.T.length + "</u> 点</span>" +
+           "<span>总时长 <u>" + mmss(o.T.length ? o.T[o.T.length - 1] : 0) + "</u></span></div>");
+    h.push("</div>");
+  }
+  host.innerHTML = h.join("");
+}
+
+function buildLegend(){
+  var host = document.getElementById("legend");
+  if (!host) return;
+  var h = [], i, k;
+  if (SER.length > 1){
+    h.push("<div class='lg-group'><div class='lg-h'>轨迹</div>");
+    for (i = 0; i < SER.length; i++)
+      h.push("<label class='lg-row'><input type='checkbox' data-ser='" + i + "'" + (S.visSeries[i] ? " checked" : "") + "><span class='lg-key' style='background:" + SER[i].color + "'></span>" + esc(SER[i].name) + "</label>");
+    h.push("</div>");
+  }
+  h.push("<div class='lg-group'><div class='lg-h'>指标</div>");
+  for (k = 0; k < METRICS.length; k++){
+    var m = METRICS[k];
+    h.push("<label class='lg-row'><input type='checkbox' data-met='" + m.k + "'" + (S.visMetric[m.k] ? " checked" : "") + "><span class='lg-key' style='background:" + m.col + "'></span>" + m.label + " <em>" + m.unit + "</em></label>");
+  }
+  h.push("</div>");
+  h.push("<div class='lg-group'><div class='lg-h'>线型</div>" +
+         "<div class='lg-row lg-static'><span class='lg-key line raw'></span>逐点</div>" +
+         "<div class='lg-row lg-static'><span class='lg-key line sm'></span>10s 平滑</div>" +
+         "<div class='lg-row lg-static'><span class='lg-key line emp'></span>经验式</div></div>");
+  host.innerHTML = h.join("");
+}
+
+function setT(t){
+  S.t = Math.max(0, Math.min(S.tMax, t));
+  var sl = document.getElementById("slider");
+  if (sl) sl.value = String(Math.round(1000 * S.t / S.tMax));
+  var lab = document.getElementById("tLabel");
+  if (lab){
+    if (S.xmode === "norm"){
+      var vs = visibleSeries(), o0 = vs.length ? vs[0].o : null;
+      lab.textContent = (100 * S.t / (S.tMax || 1)).toFixed(0) + "%" +
+        (o0 ? " · " + mmss(tLocal(o0, S.t)) + " / " + mmss(tEndOf(o0)) : "");
+    } else lab.textContent = mmss(S.t) + " / " + mmss(S.tMax);
+  }
+  updateCursor();
+}
+function drawTsTitle(){
+  var h = document.getElementById("tsTitle");
+  if (!h) return;
+  h.textContent = "时间序列（" + (S.xmode === "norm"
+    ? "每条轨迹各自时长归一 0–100%"
+    : "共享绝对时间轴 0:00–" + mmss(S.tMax)) + "）";
+}
+function drawAll(){
+  drawTsTitle(); buildLegend(); drawStats(); drawMap(); drawPanels(); setT(S.t);
+}
+
+// ---------- wiring ----------
+function syncSeg(id, attr, val){
+  var box = document.getElementById(id);
+  if (!box) return;
+  var bs = box.querySelectorAll("button"), i;
+  for (i = 0; i < bs.length; i++) bs[i].className = (bs[i].getAttribute(attr) === val) ? "on" : "";
+}
+function bindOnce(node, ev, fn, opts){ if (node && !node.__bound){ node.addEventListener(ev, fn, opts); node.__bound = true; } }
+
+(function wire(){
+  var mapBox = document.getElementById("mapCanvas");
+  if (mapBox){
+    var dragging = false, moved = false, lastX = 0, lastY = 0;
+    mapBox.addEventListener("wheel", function(e){
+      e.preventDefault();
+      var r = mapBox.getBoundingClientRect();
+      zoomAt(e.clientX - r.left, e.clientY - r.top, Math.exp(-e.deltaY * 0.0016));
+    }, { passive: false });
+    mapBox.addEventListener("pointerdown", function(e){
+      dragging = true; moved = false; lastX = e.clientX; lastY = e.clientY;
+      if (mapBox.setPointerCapture) mapBox.setPointerCapture(e.pointerId);
+    });
+    mapBox.addEventListener("pointermove", function(e){
+      var r = mapBox.getBoundingClientRect(), mx = e.clientX - r.left, my = e.clientY - r.top;
+      if (dragging){
+        if (Math.abs(e.clientX - lastX) + Math.abs(e.clientY - lastY) > 2) moved = true;
+        MAPV.cx -= (e.clientX - lastX) / MAPV.s;
+        MAPV.cy -= (e.clientY - lastY) / MAPV.s;
+        lastX = e.clientX; lastY = e.clientY;
+        drawMap();
+        return;
+      }
+      var vis = visibleSeries(), best = null, bd = Infinity, i, j, o, q, dd;
+      for (i = 0; i < vis.length; i++){
+        o = vis[i].o;
+        for (j = 0; j < o.mx.length; j += 1){
+          if (o.mx[j] === null) continue;
+          q = proj(o.mx[j], o.my[j]);
+          dd = (q[0] - mx) * (q[0] - mx) + (q[1] - my) * (q[1] - my);
+          if (dd < bd){ bd = dd; best = o.T[j]; }
+        }
+      }
+      if (best !== null && best !== undefined && bd < 60 * 60) setT(best);
+    });
+    mapBox.addEventListener("pointerup", function(){ dragging = false; });
+    mapBox.addEventListener("pointercancel", function(){ dragging = false; });
+    mapBox.addEventListener("pointerleave", function(){ dragging = false; });
+  }
+  var acts = document.querySelectorAll("[data-mapact]"), i;
+  for (i = 0; i < acts.length; i++){
+    acts[i].addEventListener("click", function(e){
+      var a = this.getAttribute("data-mapact");
+      if (a === "in") zoomAt(MAPV.W / 2, MAPV.H / 2, 1.35);
+      else if (a === "out") zoomAt(MAPV.W / 2, MAPV.H / 2, 1 / 1.35);
+      else { MAPV.init = false; fitMap(); MAPV.init = true; drawMap(); }
+      e.preventDefault();
+    });
+  }
+  var panels = document.getElementById("panels");
+  if (panels){
+    var pdrag = false;
+    function tFromEvent(e){
+      var svg = panels.querySelector("svg");
+      if (!svg || !PGEO.length) return null;
+      var g = PGEO[0];
+      var r = svg.getBoundingClientRect();
+      var W = svg.viewBox.baseVal.width || g.w || 720;
+      var ux = (e.clientX - r.left) * (W / r.width);
+      if (ux < g.x0 - 10 || ux > g.x1 + 10) return null;
+      return lin(g.x0, g.x1, 0, S.tMax).at(Math.max(g.x0, Math.min(g.x1, ux)));
+    }
+    panels.addEventListener("pointerdown", function(e){
+      var t = tFromEvent(e);
+      if (t === null || t === undefined) return;
+      pdrag = true;
+      if (panels.setPointerCapture) panels.setPointerCapture(e.pointerId);
+      setT(t);
+    });
+    panels.addEventListener("pointermove", function(e){
+      if (!pdrag) return;
+      var t = tFromEvent(e);
+      if (t !== null && t !== undefined) setT(t);
+    });
+    panels.addEventListener("pointerup", function(){ pdrag = false; });
+    panels.addEventListener("pointerleave", function(){ pdrag = false; });
+    if (window.matchMedia && window.matchMedia("(hover: hover)").matches){
+      panels.addEventListener("mousemove", function(e){
+        if (pdrag) return;
+        var t = tFromEvent(e);
+        if (t !== null && t !== undefined) setT(t);
+      });
+    }
+  }
+  var legend = document.getElementById("legend");
+  if (legend){
+    legend.addEventListener("change", function(e){
+      var t = e.target;
+      if (!t || t.type !== "checkbox") return;
+      var si = t.getAttribute("data-ser"), mk = t.getAttribute("data-met");
+      if (si !== null){ S.visSeries[Number(si)] = t.checked; drawMap(); drawPanels(); drawStats(); }
+      else if (mk){ S.visMetric[mk] = t.checked; drawPanels(); }
+    });
+  }
+  var segMode = document.getElementById("segMode");
+  if (segMode) segMode.addEventListener("click", function(e){
+    var b = e.target.closest ? e.target.closest("button") : null;
+    if (!b) return;
+    S.mode = b.getAttribute("data-mode") || "facet";
+    syncSeg("segMode", "data-mode", S.mode);
+    drawPanels();
+  });
+  var segNorm = document.getElementById("segNorm");
+  if (segNorm) segNorm.addEventListener("click", function(e){
+    var b = e.target.closest ? e.target.closest("button") : null;
+    if (!b) return;
+    S.norm = b.getAttribute("data-norm") || "z";
+    syncSeg("segNorm", "data-norm", S.norm);
+    drawPanels();
+  });
+  var segX = document.getElementById("segX");
+  if (segX) segX.addEventListener("click", function(e){
+    var b = e.target.closest ? e.target.closest("button") : null;
+    if (!b) return;
+    S.xmode = b.getAttribute("data-x") || "abs";
+    syncSeg("segX", "data-x", S.xmode);
+    drawTsTitle(); drawPanels(); setT(S.t);
+  });
+  var segRate = document.getElementById("segRate");
+  if (segRate) segRate.addEventListener("click", function(e){
+    var b = e.target.closest ? e.target.closest("button") : null;
+    if (!b) return;
+    S.rate = Number(b.getAttribute("data-rate")) || 1;
+    syncSeg("segRate", "data-rate", String(S.rate));
+  });
+  var ckSmooth = document.getElementById("ckSmooth");
+  if (ckSmooth) ckSmooth.addEventListener("change", function(){ S.smooth = ckSmooth.checked; drawPanels(); });
+  var ckEmp = document.getElementById("ckEmp");
+  if (ckEmp) ckEmp.addEventListener("change", function(){ S.emp = ckEmp.checked; drawPanels(); });
+  var ckRoad = document.getElementById("ckRoad");
+  if (ckRoad) ckRoad.addEventListener("change", function(){ S.mapRoad = ckRoad.checked; drawMap(); });
+  var ckSpeed = document.getElementById("ckSpeed");
+  if (ckSpeed) ckSpeed.addEventListener("change", function(){ S.mapSpeed = ckSpeed.checked; drawMap(); });
+  var ckTurn = document.getElementById("ckTurn");
+  if (ckTurn) ckTurn.addEventListener("change", function(){ S.mapTurn = ckTurn.checked; drawMap(); });
+  var slider = document.getElementById("slider");
+  if (slider) slider.addEventListener("input", function(){ setT(S.tMax * Number(slider.value) / 1000); });
+  var btnPlay = document.getElementById("btnPlay");
+  var last = 0;
+  function tick(ts){
+    if (!S.play) return;
+    if (!last) last = ts;
+    var dt = (ts - last) / 1000;
+    last = ts;
+    var nt = S.t + dt * S.rate;
+    if (nt >= S.tMax){ nt = 0; }
+    setT(nt);
+    requestAnimationFrame(tick);
+  }
+  if (btnPlay) btnPlay.addEventListener("click", function(){
+    S.play = !S.play;
+    btnPlay.textContent = S.play ? "暂停" : "播放";
+    btnPlay.className = S.play ? "play on" : "play";
+    last = 0;
+    if (S.play) requestAnimationFrame(tick);
+  });
+  window.addEventListener("resize", function(){
+    MAPV.init = false;
+    drawAll();
+  });
+  document.addEventListener("keydown", function(e){
+    if (e.key === "ArrowRight"){ setT(S.t + S.tMax / 200); e.preventDefault(); }
+    else if (e.key === "ArrowLeft"){ setT(S.t - S.tMax / 200); e.preventDefault(); }
+    else if (e.key === " "){ if (btnPlay) btnPlay.click(); e.preventDefault(); }
+  });
+})();
+
+syncSeg("segMode", "data-mode", S.mode);
+syncSeg("segNorm", "data-norm", S.norm);
+syncSeg("segX", "data-x", S.xmode);
+syncSeg("segRate", "data-rate", String(S.rate));
+drawAll();
+setT(SER.length ? 0 : 0);
+if (!SER.length){
+  var p = document.getElementById("panels");
+  if (p) p.innerHTML = "<div class='empty'>输入里没有 series 数据</div>";
+}
+})();
+</script>
+</body>
+</html>

@@ -35,11 +35,53 @@ ELE_DRIFT_RANGE = 0.06     # 整场漂移幅度上界（m）：真实 range 中�
 SPEED_AR1_RHO = 0.75       # lag-1 自相关目标
 SPEED_AR2_RHO2 = 0.44      # lag-2 自相关目标（真实中位）
 SPEED_LOG_SIGMA = 0.185    # 对数速度的稳态标准差（对齐 cv≈0.21）
-# 末段减速：真实速度剖面的最后一个时间十分位中位 0.746×中位速度，且因为是
-# 少数几点慢，p50 反而高于均值（真实 p50=3.43 > mean=3.22）。所以减速要
-# 陡而短，不能摊开——摊开会把中位速度拉低，方向正好相反。
+# 末段减速：真实速度剖面的最后一个时间十分位中位 0.746×中位速度，p50 反而
+# 高于均值（真实 p50=3.43 > mean=3.22）。这说明末段减速必须**陡而短**：
+# 旧实现是 9% 时长的线性缓降，等于让末段十分之一的时间都以 0.65~0.82× 运行，
+# 再叠上 AR 低值后实测末 100m 只剩 0.40×（步频 122.89、步长 59.13cm），
+# 正是用户反馈的「异常的低值持续」。现在把窗口收窄到 6% 并改用 frac² 形状：
+# 末段大部分时间仍是正常配速，减速集中在最后 2~4 秒（1~2 个采样点）。
 FINISH_DECEL = 0.35
-FINISH_WINDOW_FRAC = 0.09  # 末段减速占全程时间的比例
+FINISH_WINDOW_FRAC = 0.06  # 末段减速占全程时间的比例
+FINISH_SHAPE = 2.0         # 形状指数：1=线性（摊开全程），2=尾部集中（陡而短）
+
+# ── 速度包络（文献 + 数据标定）───────────────────────────────
+# 疲劳：docs/realism-state-of-the-art.md §2.2 的饱和指数
+#     f(d) = 1 − A·(1 − exp(−d/D))，A≈0.10~0.13，D≈0.5·总距离
+# 旧实现是 max(1.03 − 0.06·(km−0.5), 0.80)：先抬到 1.03（伪造「先快后慢」的
+# 起步加速），4.3333km 撞底后**完全平坦**，末段再没有疲劳信号，撞底处还有
+# 斜率突变。饱和指数全程单调平滑，d→∞ 渐近到 1−A，不存在平台段。
+FATIGUE_AMP = 0.12
+FATIGUE_DIST_FRAC = 0.5    # D = 0.5·总距离
+# 起跑惯性：一阶惯性 v(t)=v_c·(1−exp(−t/τ))，τ≈3~5s（同节 §2.5）。归一化成
+# 不归零的形式，起点即 R0（避免首点速度 0 造成 pace=∞ 与 0 位移）：
+#     ramp(t) = R0 + (1−R0)·(1−exp(−t/τ))
+START_INERTIA_RATIO = 0.60
+START_INERTIA_TAU = 4.0
+# 波动幅度目标：真实 Keep 的对数速度稳态 sd σ=0.185 对应 cv=√(e^σ²−1)=0.187，
+# 但包络各项是各自独立乘上去的（起步/疲劳/三条正弦/末段/步行），实测 cv 被抬
+# 到 0.236、极差 0.93~4.64 m/s、起步 600m 峰值 1.41×。这里把合成倍率的对数
+# 偏差整体归一到目标 sd 再回乘：形状与相关性不变，只收窄幅度。目标取真实
+# Keep 的 cv≈0.21。
+SPEED_CV_TARGET = 0.21
+# 落盘口径的标定增益：逐点速度是 2 位小数的 totalDis 差分/整数秒，加上
+# fit_speeds 的边界夹紧，会把 cv 系统性压低约 15%。实测把合成倍率的对数 sd
+# 归一到 target×1.18，落盘 cv 的中位才真正落在 0.21（1000/3000/8000m × 3 seed
+# 六条轨迹：0.197~0.219，中位 0.212）。
+SPEED_LOG_SD_GAIN = 1.18
+SPEED_LOG_SD_TARGET = (math.sqrt(math.log(1.0 + SPEED_CV_TARGET ** 2))
+                       * SPEED_LOG_SD_GAIN)
+# 低速持续性：低于 LOW_SPEED_RATIO×平均速度的点最多连续 LOW_SPEED_RUN_MAX 个。
+# 2s 采样下连 3 点就是 6s 以上的持续低速；真实数据里这只会出现在定位丢失
+# （已压成单个 6s 间隔）与终点停表，用户反馈的「异常的低值持续」正指这类段。
+# 这是保底约束，不是经验式：波动归一后绝大多数轨迹根本触发不到。
+LOW_SPEED_RATIO = 0.60
+LOW_SPEED_RUN_MAX = 2
+# 门槛裕度：约束在 build 里施加于「拟合前的速度序列」，而校验用的是落盘坐标
+# 差分出的速度，两者相差一次均匀缩放与 2 位小数取整（实测约 0.2%）。留 3% 裕度
+# 后，落盘序列上不会再出现恰好压着 0.6×均速的多点连段（未加裕度时会出现
+# 1.56 vs 门槛 1.5603 这类刀锋样本）。
+LOW_SPEED_GATE_MARGIN = 1.03
 
 # ── 逐点速度边界（数据标定）─────────────────────────────────
 # geom.SPEED_FLOOR=1.90 是「平均配速合法性」的下限（配速 8'46"/km），不是逐点
@@ -86,15 +128,51 @@ TURN_MEDIAN_TARGET = 3.1
 TURN_P95_TARGET = 29.0
 TURN_SUM_PER_KM_TARGET = 1230.0
 
-# ── 步频与步长（Keep 累计步数/距离短窗的近似标定）──────
-# 常规 2.5~4m/s 时步频约 168spm，速度差异主要反映在估算步长；
-# 慢行 1~2m/s 时步频下降。短窗值由累计计数推导，并非逐步传感器读数。
-CADENCE_AT_REF = 168.0
-CADENCE_REF_SPEED = 3.0
+# ── 步频与步长（经验方程）───────────────────────────────────
+# 旧实现是「v≤1.75 恒 120spm / v≥2.5 恒 168spm / 中间 smoothstep」：跑步区间
+# v≥2.5 完全不随速度变化（弹性 dln(cad)/dln(v)=0，经验值 0.28），过渡区弹性
+# 反而高达 ~1.3。实测 v=1.75 给 120 而经验式要 146.2（−17.9%），v=4.00 给
+# 168 而经验式要 184.3（−8.8%），corr(瞬时速度, 步频) 中位只有 0.2347。
+#
+# 现在改用文献经验方程对（docs/realism-state-of-the-art.md §2.1）：
+#     步长  L(v)   = STRIDE_POWER_REF_M · (v/3)^0.72 = 1.05·(v/3)^0.72  m
+#     步频  cad(v) = CADENCE_POWER_REF_SPM · (v/3)^0.28                spm
+# 推导（两者是同一个式子的两种写法，不是两条独立标定）：
+#     cad = 60·v / L = 60·v / (1.05·(v/3)^0.72)
+#         = (60·3/1.05) · (v/3)^(1−0.72)
+#         = 171.4286 · (v/3)^0.28
+# 因此 CADENCE_POWER_EXP = 1 − STRIDE_POWER_EXP，参考点 v=3 处 L=1.05m 与
+# cad=171.4286spm 严格互为 60v/L。**只把步频作为自变量、步长由 60v/cad 反推**
+# 就自动同时满足两条经验式；反过来「步频和步长各自独立满足经验式」不可能，
+# 因为 steps×stride 必须等于里程。
+STRIDE_POWER_REF_M = 1.05
+STRIDE_POWER_REF_SPEED = 3.0
+STRIDE_POWER_EXP = 0.72
+CADENCE_POWER_REF_SPEED = STRIDE_POWER_REF_SPEED
+CADENCE_POWER_EXP = 1.0 - STRIDE_POWER_EXP                      # = 0.28
+CADENCE_POWER_REF_SPM = 60.0 * STRIDE_POWER_REF_SPEED / STRIDE_POWER_REF_M  # 171.4286
+# 兼容别名（tests/tools 里的旧名字，语义保持不变）：
+#   CADENCE_AT_REF    = 参考速度处的步频（现在是幂律参考值 171.43，不再是 168）
+#   CADENCE_REF_SPEED = 参考速度
+#   STRIDE_AT_REF     = 参考速度处的步长 = 60·v_ref/cad_ref = 1.05 m
+#   CADENCE_WALK / CADENCE_WALK_SPEED / CADENCE_RUN_SPEED 曾是分段模型的两端，
+#   现保留为历史别名，不再参与计算。
+CADENCE_AT_REF = CADENCE_POWER_REF_SPM
+CADENCE_REF_SPEED = CADENCE_POWER_REF_SPEED
+STRIDE_AT_REF = CADENCE_REF_SPEED * 60.0 / CADENCE_AT_REF
 CADENCE_WALK = 120.0
 CADENCE_WALK_SPEED = 1.75
 CADENCE_RUN_SPEED = 2.5
-STRIDE_AT_REF = CADENCE_REF_SPEED * 60.0 / CADENCE_AT_REF
+# 边界钳制（**不是经验式本体**）：幂律在 v→0 时 cad→0，但那是外推失效区——
+# 经验式只在跑步区间（约 1.6~6 m/s）有数据支撑，而慢走/原地踏步仍有
+# 100~110spm。所以只做下限钳制，且它只在 v < CADENCE_FLOOR_SPEED（≈0.44m/s，
+# 即逐点速度下限附近）才可能生效，正常跑步区间永远碰不到。
+CADENCE_FLOOR_SPM = 100.0
+CADENCE_FLOOR_SPEED = CADENCE_POWER_REF_SPEED * (CADENCE_FLOOR_SPM / CADENCE_POWER_REF_SPM) ** (1.0 / CADENCE_POWER_EXP)
+
+# 步频对速度的一阶跟随时间常数（s）：真实跑者在 1~2 个步态周期内完成调整。
+# 旧实现取 15s，步频整体滞后速度十几秒，是 corr(v, cadence) 只有 0.23 的主因。
+CADENCE_RESPONSE_TAU_S = 3.0
 
 # ── 传感器（文献标定）──────────────────────────────────────
 # 垂直振荡周期 = 步频/120（每一步一次垂直起伏）。
@@ -114,13 +192,25 @@ def clip(x, lo, hi):
 
 
 def cadence_for_speed(v):
-    """慢行到稳定跑步的连续短窗步频模型（spm）。"""
-    if v <= CADENCE_WALK_SPEED:
-        return CADENCE_WALK
-    if v >= CADENCE_RUN_SPEED:
-        return CADENCE_AT_REF
-    f = (v - CADENCE_WALK_SPEED) / (CADENCE_RUN_SPEED - CADENCE_WALK_SPEED)
-    return CADENCE_WALK + (CADENCE_AT_REF - CADENCE_WALK) * f * f * (3 - 2 * f)
+    """经验幂律短窗步频（spm）：171.43·(v/3)^0.28，慢行处受下限钳制。
+
+    弹性 dln(cad)/dln(v) ≡ CADENCE_POWER_EXP = 0.28（实测目标值）；旧实现
+    v≥2.5 与 v≤1.75 两端的弹性都是 0，只有过渡区剧烈变化。
+    v→0 时幂律会趋于 0，因此加 CADENCE_FLOOR_SPM 钳制——这是边界处理，
+    不是经验式的一部分（见上方常量注释）。
+    """
+    if v <= 0:
+        return CADENCE_FLOOR_SPM
+    return max(CADENCE_FLOOR_SPM,
+               CADENCE_POWER_REF_SPM
+               * (v / CADENCE_POWER_REF_SPEED) ** CADENCE_POWER_EXP)
+
+
+def stride_power_for_speed(v):
+    """经验幂律步长（m）：1.05·(v/3)^0.72，仅供核验/诊断对照。"""
+    if v <= 0:
+        return 0.0
+    return STRIDE_POWER_REF_M * (v / STRIDE_POWER_REF_SPEED) ** STRIDE_POWER_EXP
 
 
 def stride_for_speed(v, cadence=None):
@@ -266,7 +356,8 @@ def finish_deceleration(times, dur):
             out.append(1.0)
         else:
             frac = (t - start) / max(1e-6, dur - start)
-            out.append(1.0 - (1.0 - FINISH_DECEL) * frac)
+            # 形状指数 FINISH_SHAPE>1：前段几乎不减速，减速集中在最后几个点
+            out.append(1.0 - (1.0 - FINISH_DECEL) * frac ** FINISH_SHAPE)
     return out
 
 

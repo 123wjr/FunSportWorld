@@ -208,13 +208,21 @@ class RouteGeometryTests(IsolatedCase):
                 for seed in (1, 42, 20261206):
                     for requested in (300, 2001):
                         duration = round(requested * .36)
+                        if (shape, period, seed, requested) == ("zigzag", 2, 1, 2001):
+                            # 2026-11-07 的新速度包络（起步惯性/疲劳/方差归一）把
+                            # 该固定抽样的输出弦长从 10.205m 降到 9.506m，13.2m
+                            # 道路预算内已可合法建成，"此处必须报错"的前提失效。
+                            # 速度守卫本身没改，改用同一 draw 的更短时长（配速
+                            # 3.13 m/s 而非 2.78）：每 2s 需要更大弦长，仍必须被拒。
+                            duration = 640
                         with self.subTest(shape=shape, period=period, seed=seed, distance=requested), \
                              patch.object(generator.log, "disabled", True), \
                              patch.object(generator, "_sampled_gcj_plan", wraps=generator._sampled_gcj_plan) as planner:
                             if (shape, period, seed, requested) == ("zigzag", 2, 1, 2001):
-                                # Fixed draw #88 needs 10.205m output chord but
-                                # at most 9.590m exists in its 13.2m road budget.
-                                # Reject this fixed plan without regeneration.
+                                # Fixed draw #88 at 2.78 m/s needed a 10.205m chord
+                                # while only 9.590m exists in its 13.2m road budget;
+                                # at 3.13 m/s (duration 640) it still overruns, so the
+                                # same fixed plan must be rejected without regeneration.
                                 with self.assertRaisesRegex(ValueError, "GCJ road traversal speed budget"):
                                     generator.build(requested, duration, seed, 0, road,
                                                     ordered_path=True, open_path=True,

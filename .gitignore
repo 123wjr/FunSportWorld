@@ -66,6 +66,11 @@ campus_loop_bd.json
 *.log
 logs/
 .artifacts/
+# 生成产物与本地验证目录（可复跑，不入 Git）
+/artifacts/
+/.test-tmp/
+# 真实用户导出（Keep 等），含个人轨迹，属私密数据
+/data/keep/
 obs_*.json
 *_real.json
 *_ours.json
