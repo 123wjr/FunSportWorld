@@ -192,9 +192,12 @@ def build_track(route_bd, pace_s_per_km, seed, cadence_target, start_ms,
     ring_len = ring_length(route_bd)
     dist = ring_len
     dur = dist / 1000.0 * pace_s_per_km
+    # 与生产同口径：flow.py / chain.py 都把场地高程场喂给 generator，本工具必须一致，
+    # 否则验收产物（artifacts/humanized/*.json）与线上跑的就不是同一条轨迹。
+    elevations = realism.elevations_for_path(route_bd)
     tr = gen.build(dist, round(dur), seed, start_ms, route_bd, ordered_path=True,
                    cadence_target=cadence_target, sample_period_s=sample_period_s,
-                   distance_mode="arc")
+                   distance_mode="arc", elevations_m=elevations)
     return tr, ring_len, dist, dur
 
 
@@ -224,6 +227,7 @@ def track_to_points(tr, points_bd):
             "stride_m": round(stride, 5),
             "emp_cadence": round(realism.cadence_for_speed(v), 3),
             "emp_stride_m": round(realism.stride_power_for_speed(v), 4),
+            "elevation_m": (round(float(b["bdA"]), 2) if isinstance(b.get("bdA"), (int, float)) else None),
             "corner_radius_m": (round(r, 2) if math.isfinite(r) else None),
             "u_turn": bool(math.isfinite(r) and r <= U_TURN_RADIUS_M),
         })
@@ -240,6 +244,11 @@ def overlay_doc(name, pts, road_bd, track_bd, laps, ring_len, dist, dur, seed,
         for k, v in extra_meta.items():
             if isinstance(v, (int, float, str)) and not isinstance(v, bool):
                 meta[k] = v
+            elif (isinstance(v, (list, tuple))
+                  and all(isinstance(x, (int, float)) and not isinstance(x, bool) for x in v)):
+                # 纯数字列表（如 lap_lengths_m）必须落盘：曾经的标量白名单把它**静默丢掉**，
+                # 下游只能靠猜圈边界，直接导致一次圈间距测量错到 0.02 m。
+                meta[k] = list(v)
     return {
         "name": name,
         "meta": meta,
@@ -343,7 +352,8 @@ def run(laps, seed, pace, cadence_target, out_dir, want_charts, title, start_ms,
                            "lap_lengths_m": [round(v, 3) for v in linfo["lap_lengths_m"]],
                            "seam_shift_max_m": round(linfo["seam_shift_max_m"], 3),
                            "road_length_m": round(road_len, 3),
-                           "pace_s_per_km": pace})
+                           "pace_s_per_km": pace,
+                           "elevationSource": tr.get("elevationSource", "unknown")})
         docs.append(doc)
         path = os.path.join(out_dir, "track_laps%d.json" % lap)
         with open(path, "w", encoding="utf-8") as fh:

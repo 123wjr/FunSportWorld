@@ -105,6 +105,10 @@ h1{font-size:17px;margin:0 0 2px;letter-spacing:.2px}
 .smline{fill:none;stroke-width:2.1;stroke-linejoin:round;stroke-linecap:round}
 .empline{fill:none;stroke-width:1.2;stroke-dasharray:5 4;opacity:.55}
 .cursorline{stroke:#c0392b;stroke-width:1;stroke-dasharray:3 3;opacity:.75}
+.zeroline{stroke:#b9c7c3;stroke-width:1;stroke-dasharray:2 4;fill:none}
+.medline{stroke-width:1;stroke-dasharray:1 5;opacity:.6;fill:none}
+.diffline{stroke:#7a5aa8;stroke-width:1.4;fill:none}
+#extras{display:flex;flex-direction:column;gap:6px}
 .cursorlab{font-size:10px;font-weight:600;font-variant-numeric:tabular-nums}
 .curdot{stroke:#fff;stroke-width:1.2}
 .roadline{fill:none;stroke:#9dadaa;stroke-width:1.6;stroke-dasharray:6 4;stroke-linejoin:round;opacity:.9}
@@ -198,6 +202,12 @@ footer{color:#9aacb0;font-size:10.5px;margin-top:12px;text-align:center}
     <input type="range" id="slider" min="0" max="1000" value="0" step="1">
     <div class="tlab" id="tLabel">00:00 / 00:00</div>
   </div>
+</div>
+
+<div class="card" id="exCard">
+  <h2>补充视图 · 海拔剖面 / 多圈走廊 / 摆动对比</h2>
+  <div class="sub">海拔按里程画，与主游标联动（游标所在里程处画竖线）；走廊把三圈放进同一 200 m 局部坐标里看是否真分开；摆动对比用同一 seed 重跑新旧两档参数，只改参数不改随机相位。</div>
+  <div id="extras"></div>
 </div>
 
 <footer>键盘：← / → 单步移动游标，空格 播放 / 暂停。数据与脚本全部内联，可断网打开。</footer>
@@ -817,6 +827,7 @@ function updateCursor(){
       else { var pp = proj(x, y); pg.setAttribute("transform", "translate(" + pp[0].toFixed(1) + "," + pp[1].toFixed(1) + ")"); }
     }
   }
+  updateExtraCursor();
   drawReadout();
 }
 
@@ -940,8 +951,228 @@ function drawTsTitle(){
     ? "每条轨迹各自时长归一 0–100%"
     : "共享绝对时间轴 0:00–" + mmss(S.tMax)) + "）";
 }
+// ---------------- extras: elevation / corridor / wander (task-14) ----------------
+var EX = (P && P.extras) || {};
+var XG = null;            // geometry of the elevation panel, for dist->t hover
+function xpad(v, d){ return (v >= 0 ? "+" : "") + Number(v).toFixed(d); }
+function xfmtD(v, dmax){ return dmax >= 2000 ? (v / 1000).toFixed(dmax >= 10000 ? 0 : 1) + " km" : Math.round(v) + " m"; }
+
+function elevSvg(W){
+  var all = EX.elev.series || [], rows = [], i, j;
+  for (i = 0; i < all.length; i++) if (S.visSeries[i] !== false) rows.push({ r: all[i], o: SER[i] });
+  if (!rows.length) return "";
+  var H = 224, L = 60, R = 16, T = 38, B = 30, x0 = L, x1 = W - R, y0 = T, y1 = H - B;
+  var dmax = 0, lo = Infinity, hi = -Infinity;
+  for (i = 0; i < rows.length; i++){
+    var rr = rows[i].r;
+    if (rr.s.length && rr.s[rr.s.length - 1] > dmax) dmax = rr.s[rr.s.length - 1];
+    for (j = 0; j < rr.e.length; j++){ if (rr.e[j] < lo) lo = rr.e[j]; if (rr.e[j] > hi) hi = rr.e[j]; }
+  }
+  if (!isFinite(lo) || !(dmax > 0)) return "";
+  if (hi - lo < 0.2){ var mid = (hi + lo) / 2; lo = mid - 0.1; hi = mid + 0.1; }
+  var pad = (hi - lo) * 0.18; lo -= pad; hi += pad;
+  var xx = lin(0, dmax, x0, x1), yx = lin(lo, hi, y1, y0), s = [];
+  s.push("<svg width='100%' height='" + H + "' viewBox='0 0 " + W + " " + H + "'>");
+  s.push("<rect class='pbg' x='" + x0 + "' y='" + y0 + "' width='" + (x1 - x0) + "' height='" + (y1 - y0) + "'/>");
+  var ys = niceStep(hi - lo, 4), v;
+  for (v = Math.ceil(lo / ys) * ys; v <= hi + 1e-9; v += ys){
+    var py = yx.at(v);
+    if (py < y0 - 1 || py > y1 + 1) continue;
+    s.push("<line class='grid' x1='" + x0 + "' y1='" + py.toFixed(1) + "' x2='" + x1 + "' y2='" + py.toFixed(1) + "'/>");
+    s.push("<text class='ylab' x='" + (x0 - 7) + "' y='" + (py + 3.4).toFixed(1) + "'>" + Number(v).toFixed(2) + "</text>");
+  }
+  var xs = niceStep(dmax, 6), tt;
+  for (tt = 0; tt <= dmax + 1e-9; tt += xs){
+    var px = xx.at(tt);
+    s.push("<line class='vgrid' x1='" + px.toFixed(1) + "' y1='" + y0 + "' x2='" + px.toFixed(1) + "' y2='" + y1 + "'/>");
+    s.push("<text class='xlab' x='" + px.toFixed(1) + "' y='" + (H - 10) + "'>" + xfmtD(tt, dmax) + "</text>");
+  }
+  s.push("<line class='axline' x1='" + x0 + "' y1='" + y1 + "' x2='" + x1 + "' y2='" + y1 + "'/>");
+  var gtxt = [], src = EX.elev.src || "未标注";
+  for (i = 0; i < rows.length; i++){
+    var r = rows[i].r;
+    var d = linePath(r.s, r.e, xx, yx);
+    if (d) s.push("<path class='rawline' stroke='" + r.color + "' d='" + d + "'/>");
+    gtxt.push("<tspan fill='" + r.color + "'>●</tspan> 爬升 " + xpad(r.gain_m, 2) + " m");
+  }
+  s.push("<text class='ptitle' x='" + x0 + "' y='15'>海拔剖面<tspan class='pnote'> 数据源 " + esc(src) +
+         " · 高差 " + (hi - lo - 2 * pad).toFixed(2) + " m · " + gtxt.join(" · ") + "</tspan></text>");
+  s.push("<text class='ylab' x='" + x0 + "' y='" + (y0 - 7) + "' style='text-anchor:start'>海拔 (m)</text>");
+  s.push("<text class='xlab' x='" + x1 + "' y='" + (H - 10) + "' style='text-anchor:end'>累计里程</text>");
+  s.push("<g class='xcur'></g></svg>");
+  XG = { kind: "elev", xx: xx, yx: yx, rows: rows, o: rows[0].o, x0: x0, x1: x1, y0: y0, y1: y1, W: W, H: H };
+  return s.join("");
+}
+
+function corrSvg(W){
+  var rows = EX.corr.series || [], i, j;
+  if (rows.length < 2) return "";
+  var H = 250, L = 60, R = 16, T = 52, B = 30, x0 = L, x1 = W - R, y0 = T, y1 = H - B;
+  var dmax = 0, lo = Infinity, hi = -Infinity;
+  for (i = 0; i < rows.length; i++){
+    for (j = 0; j < rows[i].s.length; j++){
+      if (rows[i].s[j] > dmax) dmax = rows[i].s[j];
+      var v = rows[i].off[j];
+      if (v < lo) lo = v; if (v > hi) hi = v;
+    }
+  }
+  var med = EX.corr.median_off || [];
+  for (i = 0; i < med.length; i++){ if (med[i] < lo) lo = med[i]; if (med[i] > hi) hi = med[i]; }
+  if (!isFinite(lo) || !(dmax > 0)) return "";
+  var pad = Math.max(0.4, (hi - lo) * 0.14); lo -= pad; hi += pad;
+  var xx = lin(0, dmax, x0, x1), yx = lin(lo, hi, y1, y0), s = [];
+  s.push("<svg width='100%' height='" + H + "' viewBox='0 0 " + W + " " + H + "'>");
+  s.push("<rect class='pbg' x='" + x0 + "' y='" + y0 + "' width='" + (x1 - x0) + "' height='" + (y1 - y0) + "'/>");
+  var ys = niceStep(hi - lo, 4), v;
+  for (v = Math.ceil(lo / ys) * ys; v <= hi + 1e-9; v += ys){
+    var py = yx.at(v);
+    if (py < y0 - 1 || py > y1 + 1) continue;
+    s.push("<line class='grid' x1='" + x0 + "' y1='" + py.toFixed(1) + "' x2='" + x1 + "' y2='" + py.toFixed(1) + "'/>");
+    s.push("<text class='ylab' x='" + (x0 - 7) + "' y='" + (py + 3.4).toFixed(1) + "'>" + Number(v).toFixed(1) + "</text>");
+  }
+  var xs = niceStep(dmax, 5), tt;
+  for (tt = 0; tt <= dmax + 1e-9; tt += xs){
+    var px = xx.at(tt);
+    s.push("<line class='vgrid' x1='" + px.toFixed(1) + "' y1='" + y0 + "' x2='" + px.toFixed(1) + "' y2='" + y1 + "'/>");
+    s.push("<text class='xlab' x='" + px.toFixed(1) + "' y='" + (H - 10) + "'>" + Math.round(tt) + " m</text>");
+  }
+  s.push("<line class='zeroline' x1='" + x0 + "' y1='" + yx.at(0).toFixed(1) + "' x2='" + x1 + "' y2='" + yx.at(0).toFixed(1) + "'/>");
+  for (i = 0; i < rows.length; i++){
+    var d = linePath(rows[i].s, rows[i].off, xx, yx);
+    if (d) s.push("<path class='rawline' stroke='" + rows[i].color + "' d='" + d + "'/>");
+    if (med.length > i) s.push("<line class='medline' stroke='" + rows[i].color + "' x1='" + x0 + "' y1='" + yx.at(med[i]).toFixed(1) +
+      "' x2='" + x1 + "' y2='" + yx.at(med[i]).toFixed(1) + "'/>");
+  }
+  s.push("<line class='axline' x1='" + x0 + "' y1='" + y1 + "' x2='" + x1 + "' y2='" + y1 + "'/>");
+  var sep = (EX.corr.pair_sep || []).join(" / ");
+  s.push("<text class='ptitle' x='" + x0 + "' y='15'>多圈走廊局部放大（" + Math.round(EX.corr.win) + " m）<tspan class='pnote'> 起点 " +
+    Math.round(EX.corr.s0) + " m · 设定扇出 " + EX.corr.design_m + " m · 窗内中位间距 " + sep +
+    " m（最紧 " + EX.corr.min_sep + " m）</tspan></text>");
+  var xc = x0, li;
+  for (li = 0; li < rows.length; li++){
+    s.push("<rect x='" + xc + "' y='21' width='9' height='9' rx='2' fill='" + rows[li].color + "'/>");
+    s.push("<text class='pnote' x='" + (xc + 13) + "' y='29'>" + rows[li].name + "</text>");
+    xc += 13 + rows[li].name.length * 12 + 16;
+  }
+  var lp = (EX.corr.lap_p50 || []).slice(1);
+  if (lp.length){
+    var lpv = [], lk;
+    for (lk = 0; lk < lp.length; lk++) lpv.push(Number(lp[lk]).toFixed(2));
+    s.push("<text class='pnote' x='" + x1 + "' y='29' style='text-anchor:end'>整圈中位距离 " + lpv.join(" / ") +
+      " m · 按弧长归一匹配（非最近点）</text>");
+  }
+  s.push("<text class='ylab' x='" + x0 + "' y='" + (y0 - 7) + "' style='text-anchor:start'>相对第 1 圈横向偏移 (m)，虚线为该圈中位数</text>");
+  s.push("<text class='xlab' x='" + x1 + "' y='" + (H - 10) + "' style='text-anchor:end'>走廊内弧长</text>");
+  s.push("</svg>");
+  return s.join("");
+}
+
+function wanderSvg(W){
+  var w = EX.wander;
+  if (!w || !w.grid || !w.new) return "";
+  var H = 300, L = 60, R = 16, x0 = L, x1 = W - R;
+  var t0 = 30, t1 = 176, b0 = 206, b1 = 274;
+  var i, lo = Infinity, hi = -Infinity, dmax = w.grid[w.grid.length - 1];
+  for (i = 0; i < w.new.length; i++){ if (w.new[i] < lo) lo = w.new[i]; if (w.new[i] > hi) hi = w.new[i]; }
+  for (i = 0; i < w.old.length; i++){ if (w.old[i] < lo) lo = w.old[i]; if (w.old[i] > hi) hi = w.old[i]; }
+  var pad = Math.max(0.3, (hi - lo) * 0.16); lo -= pad; hi += pad;
+  var dlo = Infinity, dhi = -Infinity, dd = [];
+  for (i = 0; i < w.new.length; i++){ dd.push(w.new[i] - w.old[i]); if (dd[i] < dlo) dlo = dd[i]; if (dd[i] > dhi) dhi = dd[i]; }
+  var dpad = Math.max(0.1, (dhi - dlo) * 0.16);
+  dlo -= dpad; dhi += dpad;
+  var xx = lin(0, dmax, x0, x1), yx = lin(lo, hi, t1, t0), dy = lin(dlo, dhi, b1, b0), s = [];
+  s.push("<svg width='100%' height='" + H + "' viewBox='0 0 " + W + " " + H + "'>");
+  s.push("<rect class='pbg' x='" + x0 + "' y='" + t0 + "' width='" + (x1 - x0) + "' height='" + (t1 - t0) + "'/>");
+  var ys = niceStep(hi - lo, 4), v, py;
+  for (v = Math.ceil(lo / ys) * ys; v <= hi + 1e-9; v += ys){
+    py = yx.at(v);
+    if (py < t0 - 1 || py > t1 + 1) continue;
+    s.push("<line class='grid' x1='" + x0 + "' y1='" + py.toFixed(1) + "' x2='" + x1 + "' y2='" + py.toFixed(1) + "'/>");
+    s.push("<text class='ylab' x='" + (x0 - 7) + "' y='" + (py + 3.4).toFixed(1) + "'>" + Number(v).toFixed(1) + "</text>");
+  }
+  var xs = niceStep(dmax, 6), tt;
+  for (tt = 0; tt <= dmax + 1e-9; tt += xs){
+    var px = xx.at(tt);
+    s.push("<line class='vgrid' x1='" + px.toFixed(1) + "' y1='" + t0 + "' x2='" + px.toFixed(1) + "' y2='" + b1 + "'/>");
+    s.push("<text class='xlab' x='" + px.toFixed(1) + "' y='" + (H - 8) + "'>" + Math.round(tt) + " m</text>");
+  }
+  s.push("<line class='zeroline' x1='" + x0 + "' y1='" + yx.at(0).toFixed(1) + "' x2='" + x1 + "' y2='" + yx.at(0).toFixed(1) + "'/>");
+  var dn = linePath(w.grid, w.new, xx, yx), dold = linePath(w.grid, w.old, xx, yx);
+  if (dold) s.push("<path class='smline' stroke='#b5651d' stroke-dasharray='6 4' d='" + dold + "'/>");
+  if (dn) s.push("<path class='rawline' stroke='#2a9d8f' d='" + dn + "'/>");
+  s.push("<rect class='pbg' x='" + x0 + "' y='" + b0 + "' width='" + (x1 - x0) + "' height='" + (b1 - b0) + "'/>");
+  s.push("<line class='zeroline' x1='" + x0 + "' y1='" + dy.at(0).toFixed(1) + "' x2='" + x1 + "' y2='" + dy.at(0).toFixed(1) + "'/>");
+  var dl = linePath(w.grid, dd, xx, dy);
+  if (dl) s.push("<path class='diffline' d='" + dl + "'/>");
+  s.push("<text class='ylab' x='" + (x0 - 7) + "' y='" + (b0 + 3.4) + "'>" + Number(dhi).toFixed(1) + "</text>");
+  s.push("<text class='ylab' x='" + (x0 - 7) + "' y='" + (b1 + 3.4) + "'>" + Number(dlo).toFixed(1) + "</text>");
+  var ampSwap = w.amp_old[w.amp_old.length - 1] + " → " + w.amp_new[w.amp_new.length - 1];
+  s.push("<text class='ptitle' x='" + x0 + "' y='15'>摆动对比（同 seed " + w.seed + "，只改参数）<tspan class='pnote'> " +
+    "<tspan fill='#2a9d8f'>━ 新默认</tspan> · <tspan fill='#b5651d'>┅ 旧默认</tspan> · 环长 " + Math.round(w.ring_m) +
+    " m · 第 4 波 λ≈" + w.short_lam_m + " m，该带振幅 " + ampSwap + " m</tspan></text>");
+  s.push("<text class='ylab' x='" + (x1 - 4) + "' y='" + (t0 + 12) + "' style='text-anchor:end'>横向偏移 (m)，已滤去 ≥" + Math.round(2 * (w.hp_m || 60)) + " m 的切角趋势</text>");
+  s.push("<text class='ylab' x='" + (x1 - 4) + "' y='" + (b0 + 12) + "' style='text-anchor:end'>差值 Δ=新−旧 (m) · rms " + w.d_rms + "</text>");
+  s.push("</svg>");
+  return s.join("");
+}
+
+function drawExtras(){
+  var host = document.getElementById("extras");
+  if (!host) return;
+  var W = Math.max(320, Math.round(host.clientWidth || 720)), h = [];
+  try {
+    var a = EX.elev ? elevSvg(W) : "";
+    var b = EX.corr ? corrSvg(W) : "";
+    var c = EX.wander ? wanderSvg(W) : "";
+    if (a) h.push("<div class='panel'>" + a + "</div>");
+    if (b) h.push("<div class='panel'>" + b + "</div>");
+    if (c) h.push("<div class='panel'>" + c + "</div>");
+  } catch (err){
+    h.push("<div class='empty'>补充视图渲染失败：" + esc(String(err && err.message || err)) + "</div>");
+  }
+  host.innerHTML = h.join("");
+  if (!EX.elev) XG = null;
+  updateExtraCursor();
+}
+
+function tAtDist(o, d){
+  var D = o.D, n = D.length;
+  if (!n) return 0;
+  if (d <= D[0]) return o.T[0];
+  if (d >= D[n - 1]) return o.T[n - 1];
+  var lo = 0, hi = n - 1;
+  while (lo < hi){ var m = (lo + hi) >> 1; if (D[m] < d) lo = m + 1; else hi = m; }
+  var i = Math.max(0, lo - 1), span = D[lo] - D[i];
+  if (span <= 0) return o.T[i];
+  var f = (d - D[i]) / span;
+  return o.T[i] * (1 - f) + o.T[lo] * f;
+}
+
+function updateExtraCursor(){
+  if (!XG || XG.kind !== "elev") return;
+  var host = document.getElementById("extras");
+  if (!host) return;
+  var node = host.querySelector(".xcur");
+  if (!node) return;
+  var vis = visibleSeries();
+  if (!vis.length){ node.innerHTML = ""; return; }
+  var o = vis[0].o, d = interp(o.T, o.D, tLocal(o, S.t));
+  if (d === null || !isFinite(d)){ node.innerHTML = ""; return; }
+  var px = XG.xx.at(d), s = [];
+  s.push("<line class='cursorline' x1='" + px.toFixed(1) + "' y1='" + XG.y0 + "' x2='" + px.toFixed(1) + "' y2='" + XG.y1 + "'/>");
+  for (var i = 0; i < XG.rows.length; i++){
+    var r = XG.rows[i].r;
+    var e = interp(r.s, r.e, d);
+    if (e === null || !isFinite(e)) continue;
+    var py = XG.yx.at(e);
+    s.push("<circle class='curdot' cx='" + px.toFixed(1) + "' cy='" + py.toFixed(1) + "' r='3.2' fill='" + r.color + "'/>");
+    s.push("<text class='cursorlab' x='" + (px + 5).toFixed(1) + "' y='" + (py - 6).toFixed(1) + "' fill='" + r.color + "'>" + Number(e).toFixed(2) + "</text>");
+  }
+  node.innerHTML = s.join("");
+}
+
 function drawAll(){
-  drawTsTitle(); buildLegend(); drawStats(); drawMap(); drawPanels(); setT(S.t);
+  drawTsTitle(); buildLegend(); drawStats(); drawMap(); drawPanels(); drawExtras(); setT(S.t);
 }
 
 // ---------- wiring ----------
@@ -1037,6 +1268,42 @@ function bindOnce(node, ev, fn, opts){ if (node && !node.__bound){ node.addEvent
       });
     }
   }
+  var exBox = document.getElementById("extras");
+  if (exBox){
+    var edrag = false;
+    function tFromElev(e){
+      if (!XG || XG.kind !== "elev") return null;
+      var svg = exBox.querySelector("svg");
+      if (!svg) return null;
+      var r = svg.getBoundingClientRect();
+      var W = (svg.viewBox && svg.viewBox.baseVal && svg.viewBox.baseVal.width) || XG.W || 720;
+      var ux = (e.clientX - r.left) * (W / (r.width || W));
+      if (ux < XG.x0 - 4 || ux > XG.x1 + 4) return null;
+      var d = XG.xx.inv(Math.max(XG.x0, Math.min(XG.x1, ux)));
+      return tAtDist(XG.o, d);
+    }
+    exBox.addEventListener("pointerdown", function(e){
+      var t = tFromElev(e);
+      if (t === null || t === undefined) return;
+      edrag = true;
+      if (exBox.setPointerCapture) exBox.setPointerCapture(e.pointerId);
+      setT(t);
+    });
+    exBox.addEventListener("pointermove", function(e){
+      if (!edrag) return;
+      var t = tFromElev(e);
+      if (t !== null && t !== undefined) setT(t);
+    });
+    exBox.addEventListener("pointerup", function(){ edrag = false; });
+    exBox.addEventListener("pointerleave", function(){ edrag = false; });
+    if (window.matchMedia && window.matchMedia("(hover: hover)").matches){
+      exBox.addEventListener("mousemove", function(e){
+        if (edrag) return;
+        var t = tFromElev(e);
+        if (t !== null && t !== undefined) setT(t);
+      });
+    }
+  }
   var legend = document.getElementById("legend");
   if (legend){
     legend.addEventListener("change", function(e){
@@ -1045,6 +1312,7 @@ function bindOnce(node, ev, fn, opts){ if (node && !node.__bound){ node.addEvent
       var si = t.getAttribute("data-ser"), mk = t.getAttribute("data-met");
       if (si !== null){ S.visSeries[Number(si)] = t.checked; drawMap(); drawPanels(); drawStats(); }
       else if (mk){ S.visMetric[mk] = t.checked; drawPanels(); }
+      if (si !== null) drawExtras();
     });
   }
   var segMode = document.getElementById("segMode");

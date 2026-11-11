@@ -17,7 +17,7 @@ from ..coordinates import checkpoint_coordinates, coordinate_report
 from ..diagnostics import analyze_run_checkpoints, format_report
 from ..completion import evaluate_completion
 from ..run_plan import RunPlan, checkpoint_distances, prepare_checkpoint_order
-from ..track import generator, humanize as track_humanize, wire
+from ..track import generator, humanize as track_humanize, realism, wire
 from ..track.checkpoints import evaluate_checkpoints
 from ..track.geom import (SPEED_FLOOR, SPEED_CEIL, meters_per_deg_lat,
                           meters_per_deg_lng)
@@ -281,8 +281,16 @@ def _build_amap_track(points, dist_m, pace_s, cadence, seed, start_ms):
         duration = max(1, int(round(dist_m / fixed_avg)))
     if duration > 86400:
         raise ValueError("沿高德路线生成后的时长超过 24 小时，停止生成")
+    # 海拔：接入真实 GPS 高程拟合出的场地高程场（DATA_DIR/site_elevation.json，
+    # 由 tools/measure_elevation_coupling.py 从 data/huawei 生成）。这里传的是
+    # 「与拟人化后有序顶点一一对应」的高程：route_ring 是闭环，
+    # realism.elevations_for_path 会把首尾高程强制对齐，正好满足 generator.build
+    # 的闭环校验（|h0−h[-1]| ≤ 0.1 m），否则平面场在闭合点上的微小坐标差会抛错。
+    # 高程场文件不存在时返回 None，退回 synthetic_baseline（旧行为）。
+    elevations = realism.elevations_for_path(route_ring)
     track = generator.build(dist_m, duration, seed, start_ms, route_ring,
-                            ordered_path=True, cadence_target=cadence)
+                            ordered_path=True, cadence_target=cadence,
+                            elevations_m=elevations)
     complete_laps = int((track["totalDistance"] + 0.01) // ring_len)
     return track, {"provider": "amap_walking", "vertex_count": len(ring),
                    "ring_length_m": round(ring_len, 2),

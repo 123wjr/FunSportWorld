@@ -438,16 +438,23 @@ def build(dist, dur, seed, start_ms, points_bd,
                          joint_controls.finish_transient * max(0.0, (tt / max(1.0, dur) - 0.8) / 0.2))
             w[i] *= 1.0 + transient
 
+    grades = None
     if heights is not None:
         # 用预计路径位置处的坡度调节速度分配，之后重新满足目标总里程。
+        # 系数来自 realism.grade_speed_factor = 1/PACF：上坡 Minetti 2002
+        # Cr(i)/Cr(0)，下坡 Strava 二次式 1+15.14i²+2.71i。旧的 exp(-2.0·grade)
+        # 没有任何出处，且强度只有文献的 38%（+1% 坡度只给 −1.98%，Minetti 是
+        # −5.25%、Strava 表是 −2.8%）；+5% 由 −9.5% 改为 −23.2%。
         cumulative = 0.0
         rough_distance = sum(speed * dt for speed, dt in zip(w, dts))
+        grades = [0.0] * len(dts)
         for i, dt in enumerate(dts):
             ds = dist * w[i] * dt / rough_distance
             if ds > 0:
                 grade = (_elevation_at(arcs, heights, cumulative + ds, open_path=open_path) -
                          _elevation_at(arcs, heights, cumulative, open_path=open_path)) / ds
-                w[i] *= math.exp(-2.0 * realism.clip(grade, -0.08, 0.08))
+                grades[i] = grade
+                w[i] *= realism.grade_speed_factor(grade)
             cumulative += ds
     fit_speeds(w, dts, dist, floor=realism.SPEED_FLOOR_POINT,
                ceil=realism.SPEED_CEIL_POINT)
@@ -503,10 +510,17 @@ def build(dist, dur, seed, start_ms, points_bd,
     control_speed = w[0]
     cadence_residual = 0.0
     cadence_noise = 0.0
-    for v, dt in zip(w, dts):
+    for _i, (v, dt) in enumerate(zip(w, dts)):
         cadence_noise = (0.75 * cadence_noise +
                          math.sqrt(1.0 - 0.75 ** 2) * rng.gauss(0.0, 3.0))
         response = realism.cadence_for_speed(v)
+        if grades is not None:
+            # 坡度→步频的额外耦合。realism.GRADE_CADENCE_EXTRA_PER_UNIT 默认 0，
+            # 该因子恒等于 1.0（x*1.0 == x，逐点不变），即坡度只通过速度影响步频。
+            # 保留接线是因为华为数据在固定速度下的偏斜率（−1.99%/1%）全部来自
+            # 3/65 条陡记录，不足以支撑非零系数；一旦有更好的数据，改这个常量
+            # 即可生效。此处不消耗 rng，legacy 抽取流不受影响。
+            response *= realism.grade_cadence_factor(grades[_i])
         if joint_controls is not None:
             tau_c = joint_controls.cadence_tau_s
             c_alpha = 1.0 - math.exp(-dt / tau_c)

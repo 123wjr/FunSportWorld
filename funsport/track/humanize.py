@@ -43,6 +43,15 @@ from .geom import meters_per_deg_lat, meters_per_deg_lng
 # 实测把 |dθ| 总量从 1214°/km 抬到 3896°/km —— 这是量化伪影，不是几何。
 COORD_DECIMALS = 7
 
+# 摆动波长下限。再短就低于「左右各让一步」的尺度，而且在 0.6 m 采样下会退化成
+# 锯齿：100 m 的小环上 55 个波 = 1.8 m 波长、振幅 0.26 m，单点转角 40°+。
+WANDER_MIN_WAVE_M = 20.0
+
+# 每圈扇出的保护阈值：只有曲率半径小于 LAP_TAPER_HI_M 的掉头弧才把扇出收回 0，
+# 普通圆角（corner_radius_m=8）保持全幅。
+LAP_TAPER_HI_M = 2.6
+LAP_RAMP_M = 14.0
+
 DEFAULTS = {
     # 2. 转角圆滑
     "corner_radius_m": 8.0,        # 目标圆角半径（校园场景可以大胆）
@@ -62,11 +71,18 @@ DEFAULTS = {
     "lane_taper_hi_m": 6.0,        # 大于此值 → 全幅偏移
     # 6. 掉头
     "u_turn_min_deg": 150.0,
-    "u_turn_radius_m": 1.2,        # 与 lane_offset_m 一致时几何精确相切
+    # 标称 1.2 m，但 0.6 m 采样 + 7 位 BD 量化（1 cm）把实测三点圆半径压到 1.14~1.18 m，
+    # 低于"掉头半径 >= 1.2 m"的硬约束；抬到 1.3 m 后实测 1.267 m（laps=1/3）。
+    "u_turn_radius_m": 1.3,
     "u_turn_ramp_m": 12.0,         # hu≠h 时在顶点前这么长内平滑过渡
     # 6. 直线摆动
-    "wander_amp_m": (1.20, 0.80, 0.50),   # 对应下面 3 个波数
-    "wander_waves": (8, 16, 30),           # 波长 = 环长 / 波数
+    # 振幅按真实跑步数据定标：data/huawei 80 条记录 / 179 km，取"直线段"（自身
+    # 50 m 中轴曲率半径 >150 m）后用居中滑动平均剥出横向摆动，生成侧用同一条
+    # 合成 1480 m 直路做同样测量（见 docs/.route-shape-empirics.md）。结论是不必
+    # 整体放大：10~100 m 各带通 RMS 差 <15%，只有 20~50 m 一档偏小 15~20%，
+    # 因此保留前三条、加第 4 个 ~27 m 短波分量。
+    "wander_amp_m": (1.20, 0.80, 0.52, 0.26),   # 对应下面 4 个波数
+    "wander_waves": (8, 16, 30, 55),           # 波长 = 环长 / 波数（下限 20 m）
     "wander_taper_lo_m": 4.0,              # 曲率半径小于此值不摆动
     "wander_taper_hi_m": 6.0,              # 大于此值全幅摆动
     "offset_ramp_m": 10.0,                 # 高曲率区到全幅偏移的过渡长度
@@ -85,6 +101,16 @@ DEFAULTS = {
     # 而不是把第一圈刚性复制若干份 —— 后者会让每圈的走线、圆角、摆动完全一样。
     "lap_corner_jitter": 0.15,     # 每圈圆角半径相对目标的随机抖动（±15%）
     "lap_ramp_m": 30.0,            # 接缝处平滑长度（把上一圈终点接到本圈起点）
+    # 每圈相对第 0 圈的横向扇出，倍数取 (0, +1, -1, +2, -2)（见 _LAP_LANE_PATTERN）。
+    # 定标依据：真实同向重访的横向间距 p50 1.04 / p90 2.63 m、反向 p50 2.70 /
+    # p90 5.95 m；2.0 m 落在真实分布内，又大于 route_metrics 判定的 1.5 m 重合容差。
+    # 实测多圈重复走廊 32.4%（laps=3）→ 扇出后接近 0，见 docs/.route-shape-report.md。
+    "lap_lane_m": 2.4,
+    # 各圈的摆动相位相对第 0 圈的抖动幅度（弧度）。每圈完全独立取相位时，相邻
+    # 两圈的摆动差可达 ±2.4 m，会把 lap_lane_m 的扇出整个吃掉（实测 laps=3 重合
+    # 仍剩 16%）；把相位限制在基相位附近，各圈的"人味"不同、但整体走线成车道，
+    # 重合才真的降下来。
+    "lap_phase_jitter": 0.3,
     "clean_min_seg_m": 0.5,
     # 9. 输出抽稀
     # BD 只留 COORD_DECIMALS 位小数（7 位 ≈ 1.1 cm）。若输出点间距只有
@@ -430,15 +456,19 @@ def _cycle_smooth(values, win):
 # ---------------------------------------------------------------- 6. wander
 
 def _wander_raw(P, step, total, opt):
-    """三个低频正弦叠加出的横向摆动目标（未乘包络）。波长为环长整数分之一，
+    """几条低频正弦叠加出的横向摆动目标（未乘包络）。波长为环长整数分之一，
     因此首尾天然闭合。
 
     相位由 humanize_* 的 seed 决定（opt["_phases"]），这样不同 seed 给出不同的
     摆动形状；只随机相位、不随机波数，是因为非整数波数会让环的首尾对不上。
+
+    波数按环长封顶（波长 >= WANDER_MIN_WAVE_M）：短环上同一个波数会把波长压到
+    1~2 m，振幅不变就成了锯齿而不是摆动。
     """
     n = len(P)
     amps = opt["wander_amp_m"]
-    waves = opt["wander_waves"]
+    wcap = max(1, int(total / WANDER_MIN_WAVE_M))
+    waves = [max(1, min(int(w), wcap)) for w in opt["wander_waves"]]
     phases = opt.get("_phases") or [0.37 * (j + 1) for j in range(len(waves))]
     out = []
     for i in range(n):
@@ -604,7 +634,19 @@ def _humanize_plane(P, opt):
     # 削到 0.4 m（实测 seed=0 掉头处 minR=0.52、单点转角 61°）。把 relane 一起
     # 收进包络后，弧上偏移归零、半径还原，而直线段的分道能力不受影响。
     # 另外横向偏移场必须先限斜率再施加，否则场里的台阶会被几何放大成假折角。
-    raw_off = [env[i] * (want[i] + relane[i]) for i in range(n)]
+    # 每圈的横向扇出也并进总额偏移：多圈跑同一条路时，第 k 圈整体相对第 0 圈
+    # 平移 lap_lane_m 的整数倍，这样相邻两圈的走廊真正分开（而不是靠随机相位
+    # 偶尔错开）。同样过包络 —— 圆角/掉头弧上它归零，掉头半径不被撑大。
+    # 每圈的横向扇出用**自己的一套包络**：只让掉头弧（半径 < LAP_TAPER_HI_M）把
+    # 它收回 0，半径 8 m 的普通圆角保持全幅。用摆动那套（6 m）会把 16 个圆角
+    # 也一起抹掉，而圆角加圆弧过渡约占环长 1/4 —— 实测那正是各圈重新叠到一起
+    # 的主因（laps=3 重合 32%）。掉头弧必须归零：弧半径只有 1.2 m，弧上叠一个
+    # 常值偏移会把两条腿的间距吃掉（实测 minR 掉到 0.32 m、单点转角 114°）。
+    lap_lane = float(opt.get("_lap_lane_m") or 0.0)
+    lap_env = (_offset_envelope(P, step, dict(opt, wander_taper_hi_m=LAP_TAPER_HI_M,
+                                              offset_ramp_m=LAP_RAMP_M))
+               if lap_lane else [0.0] * n)
+    raw_off = [env[i] * (want[i] + relane[i]) + lap_lane * lap_env[i] for i in range(n)]
     off = _limit_slope(raw_off, step, opt["offset_slope_max"])
 
     out = []
@@ -626,6 +668,7 @@ def _humanize_plane(P, opt):
         "offset_max_m": max(abs(v) for v in off) if off else 0.0,
         "offset_slope_max": max((abs(off[(i + 1) % n] - off[i]) / step for i in range(n)), default=0.0),
         "relane_max_m": max(abs(v) for v in relane) if relane else 0.0,
+        "lap_lane_m": lap_lane,
         "pass_index_max": max(pass_idx) if pass_idx else 0,
     }
     return out, info
@@ -660,6 +703,11 @@ def _arc_positions(P):
     return cum, total
 
 
+# 第 k 圈相对第 0 圈的横向扇出倍数。第 0 圈必须为 0：laps=1 与 humanize_route
+# 要逐点一致（tests/test_humanize_route.py::test_single_lap_matches_route_entry）。
+_LAP_LANE_PATTERN = (0.0, 1.0, -1.0, 2.0, -2.0)
+
+
 def _lap_seed(seed, k):
     """第 k 圈的子种子：k=0 用原种子（单圈与 humanize_route 完全一致）。"""
     if k == 0:
@@ -690,7 +738,10 @@ def humanize_laps(points_bd, seed=0, laps=1, **opt):
     P, center, scale = _to_plane(_cyclic(points_bd))
     jitter = max(0.0, float(o["lap_corner_jitter"]))
     base_radius = float(o["corner_radius_m"])
+    lap_lane = max(0.0, float(o["lap_lane_m"]))
+    pj = max(0.0, float(o["lap_phase_jitter"]))
 
+    base_phases = _seed_phases(seed, o)
     singles = []
     infos = []
     lap_seeds = []
@@ -699,7 +750,12 @@ def humanize_laps(points_bd, seed=0, laps=1, **opt):
         lap_seed = _lap_seed(seed, k)
         lap_seeds.append(lap_seed)
         ok = dict(o)
-        ok["_phases"] = _seed_phases(lap_seed, ok)
+        if k == 0 or pj <= 0.0:
+            ok["_phases"] = base_phases if k == 0 else _seed_phases(lap_seed, ok)
+        else:
+            rng_p = random.Random(lap_seed ^ 0x9E3779B9)
+            ok["_phases"] = [ph + rng_p.uniform(-pj, pj) for ph in base_phases]
+        ok["_lap_lane_m"] = lap_lane * _LAP_LANE_PATTERN[min(k, len(_LAP_LANE_PATTERN) - 1)]
         if k > 0 and jitter > 0.0:
             rng = random.Random(lap_seed ^ 0x5DEECE66D)
             ok["corner_radius_m"] = base_radius * rng.uniform(1.0 - jitter, 1.0 + jitter)
@@ -723,6 +779,23 @@ def humanize_laps(points_bd, seed=0, laps=1, **opt):
             w = 1.0 - _smoothstep(min(cum[i] / rr, 1.0)) if cum[i] < rr else 0.0
             out.append((nxt[i][0] + dx * w, nxt[i][1] + dy * w))
 
+    # 收尾也要接回第 0 圈的起点：每圈的横向扇出让最后一圈的末点离起点差
+    # 2*lap_lane_m 左右，直接闭合会在环的接缝处留下一个 40~50° 的折角
+    # （实测 200 m 方角环 laps=3、lap_lane_m=2.5 时闭合段单点转角 49.7°）。
+    # 这里把最后一段的位移按 smoothstep 衰减回 0，闭合差摊到 lap_ramp_m 上。
+    if laps > 1 and out:
+        cum, lap_len = _arc_positions(out)
+        rr2 = max(1.0, min(ramp, lap_len * 0.2))
+        dx2 = out[0][0] - out[-1][0]
+        dy2 = out[0][1] - out[-1][1]
+        if math.hypot(dx2, dy2) > 1e-9:
+            for i in range(len(out) - 1, -1, -1):
+                d = cum[-1] - cum[i]
+                if d >= rr2:
+                    break
+                w = _smoothstep(1.0 - d / rr2)
+                out[i] = (out[i][0] + dx2 * w, out[i][1] + dy2 * w)
+
     total = sum(_dist(out[i], out[i + 1]) for i in range(len(out) - 1))
     lap_lengths = [_arc_positions(s)[1] for s in singles]
     uturns = []
@@ -745,6 +818,8 @@ def humanize_laps(points_bd, seed=0, laps=1, **opt):
         "n_points_out": len(out),
         "seam_ramp_m": ramp,
         "lap_corner_radius_m": lap_radii,
+        "lap_lane_m": [lap_lane * _LAP_LANE_PATTERN[min(k, len(_LAP_LANE_PATTERN) - 1)]
+                       for k in range(laps)],
     })
     return _to_bd(out, center, scale), info
 

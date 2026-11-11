@@ -10,7 +10,10 @@ Keep 的估算序列不是原生逐步传感器读数；相同活动的华为/Ke
 
 每个常数都标注了来源，便于复核与改写。
 """
+import json
 import math
+import os
+from pathlib import Path
 
 # ── 采样节奏（数据标定）─────────────────────────────────────
 # 以下比例取自较早的 2s 华为样本子集，不能代表完整 Keep 导出；
@@ -174,6 +177,126 @@ CADENCE_FLOOR_SPEED = CADENCE_POWER_REF_SPEED * (CADENCE_FLOOR_SPM / CADENCE_POW
 # 旧实现取 15s，步频整体滞后速度十几秒，是 corr(v, cadence) 只有 0.23 的主因。
 CADENCE_RESPONSE_TAU_S = 3.0
 
+# ── 坡度/海拔耦合（文献经验公式 + 华为实测检验）────────────────
+# 用户诉求的顺序是「先查经验公式，再按真实数据微调」，因此本节先落文献公式，
+# 再用 data/huawei 的 80 条真实记录检验，最后决定要不要微调系数。
+#
+# 数据检验（tools/measure_elevation_coupling.py，80 条记录→71 条可用 / 9911 个
+# 100 m 窗口样本；下同，数字均可在该脚本的 JSON 输出里复现）：
+#   · 坡度用**固定 100 m 水平距离窗口**的中央差分（沿速度积分各走 50 m）。
+#     这一点很关键：若用固定 ±15s 时间窗，分母 Σv·dt 里含 v，坡度会与速度
+#     机械相关，量出来的斜率是伪相关。
+#   · 真实场地几乎是平地：100 m 窗口坡度 p1=−0.50%、p5=−0.10%、p50=0.00%、
+#     p95=+0.17%、p99=+0.63%；|grade|>0.5% 只占 2.34%、>1% 占 0.83%。
+#   · 记录内去均值（固定效应）+ 按记录聚类的稳健标准误（n=9911, R=71）：
+#       ln(v)      b=−5.67 /单位坡度  se=0.94  t=−6.05  R²within=0.0055
+#       ln(cad)    b=−3.00            se=0.67  t=−4.51
+#       ln(stride) b=−2.67            se=0.91  t=−2.94
+#     固定速度下 ln(cad) 对坡度的偏斜率 −1.42%/1%（se 0.61，t=−2.32）。
+#   · **反证**：剔除最陡的 3 条记录后（n=9449, R=68）三个斜率全部塌到
+#     |b|<0.6、|t|<0.24；逐记录斜率 33 条中位数 −2.01、IQR [−9.03,+13.56]、
+#     只有 58% 为负（≈掷硬币）。
+#     ⇒ 整条「坡度效应」由 3 条记录贡献，符号与量级都不稳定，**数据不足以
+#     标定系数**。这与用户「耦合不多」的直觉一致，因此本节不放大系数，
+#     直接采用文献公式作为有依据的默认值。
+#
+# 文献（docs/realism-state-of-the-art.md §2.3）：
+#   上坡 Minetti 2002 跑步能耗 Cr(i)（J·kg⁻¹·m⁻¹，i 为小数坡度，平地 3.6），
+#     配速调整因子 PACF=Cr(i)/3.6；i=+1% → 1.0554（等价速度 −5.25%），
+#     i=+10% → 1.658（与 Strava 官方表 1.66 一致）。
+#   下坡用 Strava 型二次式 PACF=1+15.14i²+2.71i，收益在 i=−10% 见顶
+#     （i=−5% → 0.902、i=−10% → 0.880，与官方表 0.90/0.88 一致）。
+# 旧实现是 exp(−2.0·grade)：i=+1% 只给 −1.98%，只有 Minetti 的 38%、Strava
+# 的 71%，且这个 −2.0 没有任何出处（generator.py 旧 :450 硬编码）。
+MINETTI_COST_COEFFS = (155.4, -30.4, -43.3, 46.3, 19.5, 3.6)   # i⁵ … i⁰
+MINETTI_FLAT_COST = 3.6
+MINETTI_GRADE_LIMIT = 0.45     # 多项式拟合的有效区间，超出不再外推
+GRADE_DOWN_QUAD = 15.14        # Strava 下坡二次项
+GRADE_DOWN_LIN = 2.71          # Strava 下坡一次项
+GRADE_DOWN_CAP = -0.10         # 下坡收益饱和点（更陡不再更快）
+GRADE_CLIP = 0.08              # 逐点坡度钳制（与旧实现范围一致）
+# 坡度→步频的「超出幂律」部分（固定速度下的额外响应）。
+# 实测偏斜率 −1.42%/1%（t=−2.32）同样在剔除 3 条陡记录后归零（t=−0.19），数据不支持：
+# 坡度只通过速度影响步频，再由幂律决定步长（与恒等式 60v/stride=cad 自洽）。
+GRADE_CADENCE_EXTRA_PER_UNIT = 0.0
+
+# ── 场地高程场（真实 GPS 高程拟合，可复跑）──────────────────────
+# 生产链路原本从不给 generator.build 传 elevations_m，海拔永远是
+# synthetic_baseline（常数 6.0±1.0）。这里提供一条可复跑的替代：
+# 把 data/huawei 的 GPS 高程（lbs 的 lat/lon 时间就近匹配 alt/alti）
+# 拟合成一个平面高程场，落盘到 DATA_DIR/site_elevation.json，生成时按
+# 顶点坐标取高程。
+# 拟合结果（tools/measure_elevation_coupling.py --fit-site，稳健 IRLS）：
+#   n=23691 点 / 72 条记录，alt0=5.86 m，东向 −0.174%/100m，
+#   北向 −0.560%/100m（按记录 bootstrap 200 次：东向 90% CI [−0.466,+0.158]
+#   跨零、北向 [−0.908,−0.111]），残差 rms=3.84 m，环上高程跨度 1.20 m。
+# **注意量级**：残差 rms 3.8 m 远大于校园环上的真实高差（≈1.2 m/1424 m），
+# 所以这个场本身是弱信号；它能给出「有依据、可复跑、非零」的坡度，
+# 但不要期待它带来肉眼可见的速度变化（见 docs/.elevation-coupling.md）。
+SITE_ELEVATION_SCHEMA = "site-elevation/1"
+SITE_ELEVATION_FILE = "site_elevation.json"
+
+
+def default_site_elevation_path():
+    """场地高程场默认位置：DATA_DIR/site_elevation.json。"""
+    env = os.environ.get("FUNSPORT_SITE_ELEVATION", "").strip()
+    if env:
+        return Path(env).expanduser()
+    try:
+        from .. import config as app_config
+        return Path(app_config.DATA_DIR) / SITE_ELEVATION_FILE
+    except Exception:
+        return Path(SITE_ELEVATION_FILE)
+
+
+def load_site_elevation_field(path=None):
+    """读入场地高程场；文件缺失/格式不符时返回 None（调用方退回基线）。"""
+    p = Path(path) if path is not None else default_site_elevation_path()
+    try:
+        with open(p, "r", encoding="utf-8") as fh:
+            field = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(field, dict):
+        return None
+    if field.get("schema") != SITE_ELEVATION_SCHEMA:
+        return None
+    try:
+        center = field["center"]
+        float(center[0]); float(center[1])
+        float(field["alt0_m"]); float(field["slope_east"]); float(field["slope_north"])
+        float(field["m_per_deg_lat"]); float(field["m_per_deg_lng"])
+    except (KeyError, IndexError, TypeError, ValueError):
+        return None
+    return field
+
+
+def site_field_elevation(field, lat, lon):
+    """平面高程场在 (lat, lon) 处的高程（m）。"""
+    lat0, lon0 = field["center"]
+    return (float(field["alt0_m"])
+            + float(field["slope_north"]) * (float(lat) - lat0) * float(field["m_per_deg_lat"])
+            + float(field["slope_east"]) * (float(lon) - lon0) * float(field["m_per_deg_lng"]))
+
+
+def elevations_for_path(points_bd, field=None, path=None):
+    """给有序路径顶点生成一一对应的高程（m）。
+
+    返回 None 表示没有可用高程场，调用方应退回 synthetic_baseline。
+    闭环路径（首尾同点）强制 last=first，以满足 generator.build 的
+    「闭环首尾高程一致（≤0.1 m）」校验；否则那个校验会因为平面场在
+    闭合点上的微小坐标差而白白抛错。
+    """
+    if field is None:
+        field = load_site_elevation_field(path)
+    if not field or not points_bd:
+        return None
+    values = [site_field_elevation(field, p[0], p[1]) for p in points_bd]
+    if len(values) > 1 and tuple(points_bd[0]) == tuple(points_bd[-1]):
+        values[-1] = values[0]
+    return values
+
+
 # ── 传感器（文献标定）──────────────────────────────────────
 # 垂直振荡周期 = 步频/120（每一步一次垂直起伏）。
 GAIT_VERT_FREQ_DIV = 120.0
@@ -218,6 +341,44 @@ def stride_for_speed(v, cadence=None):
     if v <= 0:
         return 0.0
     return 60.0 * v / (cadence if cadence is not None else cadence_for_speed(v))
+
+
+def minetti_cost_ratio(grade):
+    """Minetti 2002 跑步能耗相对平地的比值 Cr(i)/Cr(0)，i 为小数坡度。"""
+    i = clip(grade, -MINETTI_GRADE_LIMIT, MINETTI_GRADE_LIMIT)
+    c = 0.0
+    for coeff in MINETTI_COST_COEFFS:
+        c = c * i + coeff
+    return c / MINETTI_FLAT_COST
+
+
+def grade_pace_factor(grade):
+    """坡度配速调整因子 PACF：上坡走 Minetti，下坡走 Strava 二次式。"""
+    if grade >= 0.0:
+        return minetti_cost_ratio(grade)
+    i = max(grade, GRADE_DOWN_CAP)
+    return GRADE_DOWN_QUAD * i * i + GRADE_DOWN_LIN * i + 1.0
+
+
+def grade_speed_factor(grade):
+    """同一段路按坡度重分配速度用的乘子 = 1/PACF（>1 下坡加速，<1 上坡减速）。"""
+    g = clip(grade, -GRADE_CLIP, GRADE_CLIP)
+    if g == 0.0:
+        return 1.0
+    return 1.0 / grade_pace_factor(g)
+
+
+def grade_cadence_factor(grade):
+    """坡度对步频的额外乘子（超出「坡度→速度→幂律步频」的部分）。
+
+    默认 GRADE_CADENCE_EXTRA_PER_UNIT=0 ⇒ 恒等于 1：华为数据给出的固定速度
+    偏斜率完全来自 3/65 条陡记录，剔除后归零，不足以支撑一个额外系数。
+    保留此接口是为了让「坡度直接影响步频」这条路有明确、可测试的接线点。
+    """
+    if not GRADE_CADENCE_EXTRA_PER_UNIT:
+        return 1.0
+    g = clip(grade, -GRADE_CLIP, GRADE_CLIP)
+    return math.exp(GRADE_CADENCE_EXTRA_PER_UNIT * g)
 
 
 def vertical_amplitude(v):

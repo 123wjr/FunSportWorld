@@ -295,9 +295,13 @@ def build_chain_route(start_gcj, points_gcj, target_m=DEFAULT_TARGET_M,
     dur = max(1, int(round(dist / 1000.0 * pace_s)))
     if not start_ms:
         start_ms = int(time.time() * 1000)
+    # 海拔接线：与 flow.py 同一套场地高程场，传「与拟人化后有序顶点一一对应」
+    # 的高程；闭环时 realism.elevations_for_path 保证首尾一致，满足生成器的闭环
+    # 校验。无高程场文件时返回 None，退回 synthetic_baseline。
+    elevations = realism.elevations_for_path(route_bd)
     track = gen.build(dist, dur, seed, start_ms, route_bd, ordered_path=True,
                       cadence_target=cadence, sample_period_s=2,
-                      distance_mode="arc")
+                      distance_mode="arc", elevations_m=elevations)
     pts, total = track_to_points(track, route_bd)
     stats = summarize(pts)
     road_gcj = [(float(p[0]), float(p[1])) for p in chain_gcj]
